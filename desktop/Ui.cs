@@ -671,14 +671,15 @@ namespace VirtualStereo.Desktop
             DrawWaveBox();
 
             ImGui.Spacing();
-            ImGui.Text("每耳频谱（2048 点 Hann；纵 -90..0 dB，横 20Hz..Nyquist 对数）");
+            ImGui.Text("每耳频谱（2048 点 Hann；纵 -90..0 dB，横 20Hz..Nyquist 对数；上下同刻度）");
             if (Environment.TickCount64 >= _nextSpecAt)
             {
                 _nextSpecAt = Environment.TickCount64 + 100;
                 ComputeSpectrum(_wL, _specL);
                 ComputeSpectrum(_wR, _specR);
             }
-            DrawSpecBox(mon.Rate);
+            DrawSpecBox(mon.Rate, _specL, Col(80, 150, 255), "L耳");
+            DrawSpecBox(mon.Rate, _specR, Col(255, 95, 90), "R耳");
         }
 
         private static void DrawWaveBox()
@@ -723,10 +724,10 @@ namespace VirtualStereo.Desktop
             }
         }
 
-        private static void DrawSpecBox(int rate)
+        private static void DrawSpecBox(int rate, float[] spec, uint col, string label)
         {
             float w = Math.Min(900f, Math.Max(360f, ImGui.GetContentRegionAvail().X));
-            const float h = 220f;
+            const float h = 160f;
             Vector2 origin = ImGui.GetCursorScreenPos();
             ImGui.Dummy(new Vector2(w, h));
             var dl = ImGui.GetWindowDrawList();
@@ -752,8 +753,8 @@ namespace VirtualStereo.Desktop
                 dl.AddText(new Vector2(origin.X + 4, y + 2), Col(95, 100, 115), db.ToString(CultureInfo.InvariantCulture));
             }
 
-            DrawSpecTrace(dl, origin, w, h, _specL, Col(80, 150, 255), lo, hi, nyq);
-            DrawSpecTrace(dl, origin, w, h, _specR, Col(255, 95, 90), lo, hi, nyq);
+            DrawSpecTrace(dl, origin, w, h, spec, col, lo, hi, nyq);
+            dl.AddText(new Vector2(origin.X + w - 34, origin.Y + 4), col, label);
         }
 
         private static void DrawSpecTrace(ImDrawListPtr dl, Vector2 origin, float w, float h,
