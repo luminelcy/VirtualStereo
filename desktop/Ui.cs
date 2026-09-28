@@ -82,15 +82,18 @@ namespace VirtualStereo.Desktop
 
         private static void DrawSidebar()
         {
-            ImGui.BeginChild("##nav", new System.Numerics.Vector2(180, -1), true);
+            ImGui.BeginChild("##nav", new System.Numerics.Vector2(200, -1), true);
             ImGui.Text("VirtualStereo");
             ImGui.TextDisabled("实验平台");
             ImGui.Separator();
 
+            // 注意：Selectable 的尺寸必须显式给宽度——它不像 Button 支持 -1 填满，
+            // 负宽度会生成塌缩矩形，文字被裁成残字（实测教训）
+            float rowW = ImGui.GetContentRegionAvail().X;
             foreach (var p in Panels)
             {
                 bool active = p.Id == UiState.Current;
-                if (ImGui.Selectable(p.Title + "##nav" + (int)p.Id, active, 0, new System.Numerics.Vector2(-1, 38)))
+                if (ImGui.Selectable(p.Title + "##nav" + (int)p.Id, active, 0, new System.Numerics.Vector2(rowW, 36)))
                 {
                     UiState.Go(p.Id);
                     if (_cfg != null) _cfg.LastPage = (int)p.Id;
@@ -187,11 +190,11 @@ namespace VirtualStereo.Desktop
         {
             // 前置增益：进空间模拟之前
             GainRow("前置增益dB##pre", app.PreGainDb, -24f, 12f, v => app.PreGainDb = v, ref _preGainText);
-            ImGui.TextDisabled("↑ 进模拟之前（输入电平）");
+            ImGui.TextDisabled("-> 进模拟之前（输入电平）");
 
             // 后置增益：空间模拟之后、出声之前
             GainRow("后置增益dB##post", app.PostGainDb, -24f, 12f, v => app.PostGainDb = v, ref _postGainText);
-            ImGui.TextDisabled("↑ 模拟之后（输出电平）");
+            ImGui.TextDisabled("-> 模拟之后（输出电平）");
 
             ImGui.Spacing();
             ImGui.Text(app.Capturing
@@ -204,10 +207,10 @@ namespace VirtualStereo.Desktop
             ImGui.ProgressBar(Math.Min(app.OutPeak, 1.5f) / 1.5f, new System.Numerics.Vector2(-1, 18),
                 $"{app.OutPeak:F3}");
             if (app.OutPeak > 1f)
-                ImGui.TextColored(new System.Numerics.Vector4(1, 0.4f, 0.4f, 1), "← 爆电平");
+                ImGui.TextColored(new System.Numerics.Vector4(1, 0.4f, 0.4f, 1), "爆电平！");
 
             ImGui.Spacing();
-            if (ImGui.Checkbox("静音原声（ε，消双响）", ref _silenceTmp))
+            if (ImGui.Checkbox("静音原声（消双响）", ref _silenceTmp))
                 app.SilenceOriginal = _silenceTmp;
         }
 
