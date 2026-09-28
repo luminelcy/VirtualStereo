@@ -79,6 +79,13 @@ if (settings.CalRate > 0) app.Cal.MeasRate = settings.CalRate;
 app.Cal.LoadMeasured(settings.CalGridHz, settings.CalMeasL, settings.CalMeasR,
     settings.CalF1, settings.CalF2, settings.CalTimeTicks);
 app.Cal.SetEnabled(settings.CalEnabled);
+// 音箱校准
+app.SpkCal.SmoothOct = settings.SpkCalSmoothOct;
+app.SpkCal.MaxBoostDb = settings.SpkCalMaxBoostDb;
+if (settings.SpkCalRate > 0) app.SpkCal.MeasRate = settings.SpkCalRate;
+app.SpkCal.LoadMeasured(settings.SpkCalGridHz, settings.SpkCalMeasL, settings.SpkCalMeasR,
+    settings.SpkCalF1, settings.SpkCalF2, settings.SpkCalTimeTicks);
+app.SpkCal.SetEnabled(settings.SpkCalEnabled);
 // 后处理 PEQ（数组长度对不上就用默认值，防手工改配置文件改坏）
 if (settings.PostOn != null && settings.PostOn.Length == PostEq.Bands)
     for (int i = 0; i < PostEq.Bands; i++) app.Post.On[i] = settings.PostOn[i];
@@ -151,6 +158,16 @@ void SaveSettings()
     settings.CalGridHz = app.Cal.HasCurve ? (float[])app.Cal.GridHz.Clone() : null;
     settings.CalMeasL = app.Cal.HasCurve ? (float[])app.Cal.MeasL.Clone() : null;
     settings.CalMeasR = app.Cal.HasCurve ? (float[])app.Cal.MeasR.Clone() : null;
+    settings.SpkCalEnabled = app.SpkCal.Enabled;
+    settings.SpkCalSmoothOct = app.SpkCal.SmoothOct;
+    settings.SpkCalMaxBoostDb = app.SpkCal.MaxBoostDb;
+    settings.SpkCalF1 = app.SpkCal.MeasF1;
+    settings.SpkCalF2 = app.SpkCal.MeasF2;
+    settings.SpkCalRate = (int)app.SpkCal.MeasRate;
+    settings.SpkCalTimeTicks = app.SpkCal.DoneAtTicks;
+    settings.SpkCalGridHz = app.SpkCal.HasCurve ? (float[])app.SpkCal.GridHz.Clone() : null;
+    settings.SpkCalMeasL = app.SpkCal.HasCurve ? (float[])app.SpkCal.MeasSrcL.Clone() : null;
+    settings.SpkCalMeasR = app.SpkCal.HasCurve ? (float[])app.SpkCal.MeasSrcR.Clone() : null;
     settings.PostEnabled = app.Post.Enabled;
     settings.PostOn = (bool[])app.Post.On.Clone();
     settings.PostType = (int[])app.Post.Type.Clone();

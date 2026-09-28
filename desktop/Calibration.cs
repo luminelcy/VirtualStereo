@@ -78,7 +78,7 @@ namespace VirtualStereo.Desktop
         private readonly float[] _gL = new float[MaxBands];
         private readonly float[] _gR = new float[MaxBands];
 
-        private readonly Corrector _eq = new Corrector();
+        private readonly EqCorrector _eq = new EqCorrector();
 
         public bool IsBusy => State == Sweep || State == Analyzing;
 
@@ -172,7 +172,7 @@ namespace VirtualStereo.Desktop
         /// <summary>输出侧校准 EQ（仅 Enabled 时生效）。</summary>
         public void Process(float[] stereo, int frames)
         {
-            if (Enabled) _eq.Process(stereo, frames);
+            if (Enabled) _eq.ProcessStereo(stereo, frames);
         }
 
         public void SetEnabled(bool on)
@@ -253,8 +253,8 @@ namespace VirtualStereo.Desktop
             if (runId == _runId) State = Ready;
         }
 
-        /// <summary>一条捕获 → FFT → H = Y·conj(S)/|S|² 累加进目标耳。</summary>
-        private static void AccumulateOne(float[] y,
+        /// <summary>一条捕获 → FFT → H = Y·conj(S)/|S|² 累加进目标数组（音箱校准也复用）。</summary>
+        internal static void AccumulateOne(float[] y,
             float[] sRe, float[] sIm, float thr,
             float[] dstRe, float[] dstIm, int p)
         {
@@ -282,7 +282,7 @@ namespace VirtualStereo.Desktop
         }
 
         /// <summary>复数 H → 对数栅格带内平均 → dB（带空缺向外扩找有效 bin）。</summary>
-        private static void ToGrid(float[] hRe, float[] hIm, float[] sRe, float[] sIm,
+        internal static void ToGrid(float[] hRe, float[] hIm, float[] sRe, float[] sIm,
             float thr, int p, int rate, float[] grid, float[] dst)
         {
             int gn = grid.Length;
@@ -321,17 +321,17 @@ namespace VirtualStereo.Desktop
 
             double spanOct = Math.Log(GridHz[GridN - 1] / GridHz[0], 2.0);
             float gridOct = (float)(spanOct / (GridN - 1));
-            SmoothInto(MeasL, _smL, smooth, gridOct);
-            SmoothInto(MeasR, _smR, smooth, gridOct);
+            EqDesign.SmoothInto(MeasL, _smL, smooth, gridOct);
+            EqDesign.SmoothInto(MeasR, _smR, smooth, gridOct);
 
-            float refL = MidbandMean(_smL);
-            float refR = MidbandMean(_smR);
+            float refL = EqDesign.MidbandMean(GridHz, _smL);
+            float refR = EqDesign.MidbandMean(GridHz, _smR);
             for (int i = 0; i < GridN; i++)
             {
                 DispL[i] = _smL[i] - refL;
                 DispR[i] = _smR[i] - refR;
-                CorrL[i] = Clamp(-DispL[i], -30f, maxBoost);
-                CorrR[i] = Clamp(-DispR[i], -30f, maxBoost);
+                CorrL[i] = EqDesign.Clamp(-DispL[i], -30f, maxBoost);
+                CorrR[i] = EqDesign.Clamp(-DispR[i], -30f, maxBoost);
             }
 
             // 峰化 EQ：1/3 倍频程布带（≤32），Q 由带宽公式反推
@@ -343,8 +343,8 @@ namespace VirtualStereo.Desktop
             for (int b = 0; b < n; b++)
             {
                 _bandHz[b] = (float)(GridHz[0] * Math.Pow(2.0, spacing * b));
-                _gL[b] = InterpAt(CorrL, _bandHz[b]);
-                _gR[b] = InterpAt(CorrR, _bandHz[b]);
+                _gL[b] = EqDesign.InterpAt(GridHz, CorrL, _bandHz[b]);
+                _gR[b] = EqDesign.InterpAt(GridHz, CorrR, _bandHz[b]);
             }
             _eq.ApplyDesign(_bandHz, _gL, _gR, n, q, (int)MeasRate);
 
@@ -386,8 +386,12 @@ namespace VirtualStereo.Desktop
             if (!HasCurve || !Enabled) return 0f;
             return _eq.MagSumDb(0, freq);
         }
+    }
 
-        private static void SmoothInto(float[] src, float[] dst, float smoothOct, float gridOct)
+    /// <summary>校准曲线设计工具（输出校准与音箱校准共用）：平滑/中带归一/对数插值/限幅。</summary>
+    internal static class EqDesign
+    {
+        public static void SmoothInto(float[] src, float[] dst, float smoothOct, float gridOct)
         {
             int w = (int)Math.Round(smoothOct / Math.Max(1e-6f, gridOct));
             if (w < 1) w = 1;
@@ -409,108 +413,130 @@ namespace VirtualStereo.Desktop
         }
 
         /// <summary>中带（200..4000Hz）均值：归一参考，校准不改整体响度。</summary>
-        private float MidbandMean(float[] sm)
+        public static float MidbandMean(float[] grid, float[] curve)
         {
             double sum = 0;
             int cnt = 0;
-            for (int i = 0; i < GridN; i++)
+            for (int i = 0; i < grid.Length; i++)
             {
-                if (GridHz[i] < 200f || GridHz[i] > 4000f) continue;
-                sum += sm[i];
+                if (grid[i] < 200f || grid[i] > 4000f) continue;
+                sum += curve[i];
                 cnt++;
             }
-            return cnt > 0 ? (float)(sum / cnt) : sm[GridN / 2];
+            return cnt > 0 ? (float)(sum / cnt) : curve[grid.Length / 2];
         }
 
-        /// <summary>对数频率插值取校准曲线值。</summary>
-        private float InterpAt(float[] curve, float f)
+        /// <summary>对数频率插值取曲线上值。</summary>
+        public static float InterpAt(float[] grid, float[] curve, float f)
         {
-            if (f <= GridHz[0]) return curve[0];
-            if (f >= GridHz[GridN - 1]) return curve[GridN - 1];
+            int last = grid.Length - 1;
+            if (f <= grid[0]) return curve[0];
+            if (f >= grid[last]) return curve[last];
             double lf = Math.Log(f);
-            for (int i = 1; i < GridN; i++)
+            for (int i = 1; i <= last; i++)
             {
-                if (GridHz[i] < f) continue;
-                double t = (lf - Math.Log(GridHz[i - 1]))
-                    / (Math.Log(GridHz[i]) - Math.Log(GridHz[i - 1]));
+                if (grid[i] < f) continue;
+                double t = (lf - Math.Log(grid[i - 1]))
+                    / (Math.Log(grid[i]) - Math.Log(grid[i - 1]));
                 return (float)(curve[i - 1] + (curve[i] - curve[i - 1]) * t);
             }
-            return curve[GridN - 1];
+            return curve[last];
         }
 
-        private static float Clamp(float v, float lo, float hi) => v < lo ? lo : (v > hi ? hi : v);
+        public static float Clamp(float v, float lo, float hi) => v < lo ? lo : (v > hi ? hi : v);
+    }
 
-        /// <summary>每耳级联峰化双二阶（图形 EQ）。音频线程 Tick / UI 线程改系数。</summary>
-        private sealed class Corrector
+    /// <summary>每通道级联峰化双二阶（图形 EQ），两通道各一套系数。
+    /// 用法：输出校准 ProcessStereo（交错双耳）；音箱校准 ProcessDual（两路源单声道）。
+    /// 音频线程 Tick / UI 线程改系数（同一把锁）。</summary>
+    internal sealed class EqCorrector
+    {
+        private readonly Biquad[][] _ch;
+        private readonly object _lock = new object();
+        private int _n;
+        private int _rate = 48000;
+
+        public EqCorrector()
         {
-            private readonly Biquad[][] _ch;
-            private readonly object _lock = new object();
-            private int _n;
-            private int _rate = 48000;
-
-            public Corrector()
+            _ch = new Biquad[2][];
+            for (int c = 0; c < 2; c++)
             {
-                _ch = new Biquad[2][];
+                _ch[c] = new Biquad[Calibration.MaxBands];
+                for (int i = 0; i < Calibration.MaxBands; i++) _ch[c][i] = new Biquad();
+            }
+        }
+
+        public void ApplyDesign(float[] hz, float[] gL, float[] gR, int n, float q, int rate)
+        {
+            lock (_lock)
+            {
+                _rate = rate > 0 ? rate : 48000;
+                for (int i = 0; i < n; i++)
+                {
+                    _ch[0][i].SetPeaking(_rate, hz[i], q, gL[i]);
+                    _ch[1][i].SetPeaking(_rate, hz[i], q, gR[i]);
+                }
+                _n = n;
+            }
+        }
+
+        public float MagDb(int ch, int band, float freq)
+        {
+            lock (_lock) return _ch[ch][band].MagDb(freq, _rate);
+        }
+
+        public float MagSumDb(int ch, float freq)
+        {
+            lock (_lock)
+            {
+                float sum = 0f;
+                for (int b = 0; b < _n; b++) sum += _ch[ch][b].MagDb(freq, _rate);
+                return sum;
+            }
+        }
+
+        /// <summary>交错立体声（输出校准用）。</summary>
+        public void ProcessStereo(float[] stereo, int frames)
+        {
+            lock (_lock)
+            {
+                if (_n <= 0) return;
+                for (int i = 0; i < frames; i++)
+                {
+                    float l = stereo[i * 2], r = stereo[i * 2 + 1];
+                    for (int b = 0; b < _n; b++) l = _ch[0][b].Tick(l);
+                    for (int b = 0; b < _n; b++) r = _ch[1][b].Tick(r);
+                    stereo[i * 2] = l;
+                    stereo[i * 2 + 1] = r;
+                }
+            }
+        }
+
+        /// <summary>两路单声道（音箱校准用：左源走通道0，右源走通道1）。</summary>
+        public void ProcessDual(float[] monoA, float[] monoB, int frames)
+        {
+            lock (_lock)
+            {
+                if (_n <= 0) return;
+                for (int i = 0; i < frames; i++)
+                {
+                    float x = monoA[i];
+                    for (int b = 0; b < _n; b++) x = _ch[0][b].Tick(x);
+                    monoA[i] = x;
+                    float y = monoB[i];
+                    for (int b = 0; b < _n; b++) y = _ch[1][b].Tick(y);
+                    monoB[i] = y;
+                }
+            }
+        }
+
+        public void ResetAll()
+        {
+            lock (_lock)
+            {
                 for (int c = 0; c < 2; c++)
-                {
-                    _ch[c] = new Biquad[MaxBands];
-                    for (int i = 0; i < MaxBands; i++) _ch[c][i] = new Biquad();
-                }
-            }
-
-            public void ApplyDesign(float[] hz, float[] gL, float[] gR, int n, float q, int rate)
-            {
-                lock (_lock)
-                {
-                    _rate = rate > 0 ? rate : 48000;
-                    for (int i = 0; i < n; i++)
-                    {
-                        _ch[0][i].SetPeaking(_rate, hz[i], q, gL[i]);
-                        _ch[1][i].SetPeaking(_rate, hz[i], q, gR[i]);
-                    }
-                    _n = n;
-                }
-            }
-
-            public float MagDb(int ch, int band, float freq)
-            {
-                lock (_lock) return _ch[ch][band].MagDb(freq, _rate);
-            }
-
-            public float MagSumDb(int ch, float freq)
-            {
-                lock (_lock)
-                {
-                    float sum = 0f;
-                    for (int b = 0; b < _n; b++) sum += _ch[ch][b].MagDb(freq, _rate);
-                    return sum;
-                }
-            }
-
-            public void Process(float[] stereo, int frames)
-            {
-                lock (_lock)
-                {
-                    if (_n <= 0) return;
-                    for (int i = 0; i < frames; i++)
-                    {
-                        float l = stereo[i * 2], r = stereo[i * 2 + 1];
-                        for (int b = 0; b < _n; b++) l = _ch[0][b].Tick(l);
-                        for (int b = 0; b < _n; b++) r = _ch[1][b].Tick(r);
-                        stereo[i * 2] = l;
-                        stereo[i * 2 + 1] = r;
-                    }
-                }
-            }
-
-            public void ResetAll()
-            {
-                lock (_lock)
-                {
-                    for (int c = 0; c < 2; c++)
-                        for (int b = 0; b < MaxBands; b++)
-                            _ch[c][b].Reset();
-                }
+                    for (int b = 0; b < Calibration.MaxBands; b++)
+                        _ch[c][b].Reset();
             }
         }
     }

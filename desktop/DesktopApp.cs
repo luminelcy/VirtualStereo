@@ -1,6 +1,7 @@
 // 桌面应用状态与音频处理循环：
-//   捕获环 → 前置增益 → [校准扫频注入] → 指向性/距离 → 直通/双耳/ITD+ILD
-//   → [听音室：一次反射+混响] → 两耳 tap → 校准 EQ → 后处理 PEQ → 后置增益 → 播放
+//   捕获环 → 前置增益 → [输出校准扫频注入] → 音箱EQ(源端) → [音箱校准扫频注入]
+//   → 指向性/距离 → 直通/双耳/ITD+ILD（音箱校准测量中强制直通）
+//   → [听音室：一次反射+混响] → 两耳 tap → 输出校准 EQ → 后处理 PEQ → 后置增益 → 播放
 // UI 线程只改字段；音频线程每块读取（字段竞争为良性，参数变更对齐到块边界）。
 using System;
 using VirtualStereo.Capture;
@@ -38,6 +39,9 @@ namespace VirtualStereo.Desktop
 
         // 校准：扫频测量两耳频响 → 输出侧反相 EQ 拉平（见 Calibration.cs）
         public readonly Calibration Cal = new Calibration();
+
+        // 音箱校准：每箱单独扫频测到两耳（旁路 HRTF）→ 源端反相 EQ（见 SpeakerCal.cs）
+        public readonly SpeakerCal SpkCal = new SpeakerCal();
 
         // 后处理 PEQ：校准之后、播放之前的输出调音（见 PostEq.cs）
         public readonly PostEq Post = new PostEq();
@@ -115,6 +119,7 @@ namespace VirtualStereo.Desktop
         public void StopCapture()
         {
             Cal.Cancel(); // 输出链路拆了，扫频无处可走
+            SpkCal.Cancel();
             Monitor.StopRecording();
             try { _player?.Dispose(); } catch { }
             try { _capture?.Dispose(); } catch { } // 恢复被压过的会话音量
@@ -147,15 +152,27 @@ namespace VirtualStereo.Desktop
             }
         }
 
-        /// <summary>开始校准扫频。返回 null=成功 / 错误信息。</summary>
+        /// <summary>开始输出校准扫频。返回 null=成功 / 错误信息。</summary>
         public string StartCalibration()
         {
+            if (SpkCal.IsBusy) return "音箱校准进行中，先完成或取消它";
             string err = EnsureOutput();
             if (err != null) return err;
             return Cal.Start(_outputRate);
         }
 
         public void CancelCalibration() => Cal.Cancel();
+
+        /// <summary>开始音箱校准扫频（每箱一遍）。返回 null=成功 / 错误信息。</summary>
+        public string StartSpeakerCalibration()
+        {
+            if (Cal.IsBusy) return "输出校准进行中，先完成或取消它";
+            string err = EnsureOutput();
+            if (err != null) return err;
+            return SpkCal.Start(_outputRate);
+        }
+
+        public void CancelSpeakerCalibration() => SpkCal.Cancel();
 
         public void ApplyInterpolation()
         {
@@ -240,6 +257,10 @@ namespace VirtualStereo.Desktop
             // 校准扫频：替换两路音箱信号（扫频期间听不到源内容）
             Cal.Generate(_monoL, _monoR, Chunk, rate);
 
+            // 音箱校准：源端补偿 EQ → 其扫频替换在 EQ 之后（=测量时旁路自身 EQ）
+            SpkCal.Process(_monoL, _monoR, Chunk);
+            SpkCal.Generate(_monoL, _monoR, Chunk, rate);
+
             // 音箱指向性（分频）：前置增益之后、空间模拟之前（朝向每源独立）
             if (Directivity.Enabled)
             {
@@ -257,7 +278,8 @@ namespace VirtualStereo.Desktop
 
             lock (_dspLock)
             {
-                if (CurrentMode == (int)Mode.Passthrough)
+                // 音箱校准测量中强制直通：旁路 HRTF（测"音箱本身"，双耳线索不参与）
+                if (CurrentMode == (int)Mode.Passthrough || SpkCal.Measuring)
                 {
                     for (int i = 0; i < Chunk; i++)
                     {
@@ -282,6 +304,7 @@ namespace VirtualStereo.Desktop
             // （裸双耳信号：监视/录制/校准测量都取这里）
             Monitor.Push(_stereo, Chunk, rate);
             Cal.OnEars(_stereo, Chunk);
+            SpkCal.OnEars(_stereo, Chunk);
 
             // 校准 EQ：输出侧把两耳频响拉平（校准模式开时生效）
             Cal.Process(_stereo, Chunk);

@@ -53,6 +53,18 @@ namespace VirtualStereo.Desktop
         public float[] CalMeasL { get; set; } = null;
         public float[] CalMeasR { get; set; } = null;
 
+        // 音箱校准（源端补偿；每箱两耳 dB 平均一条曲线）
+        public bool SpkCalEnabled { get; set; } = false;
+        public float SpkCalSmoothOct { get; set; } = 0.333f;
+        public float SpkCalMaxBoostDb { get; set; } = 6f;
+        public float SpkCalF1 { get; set; } = 10f;
+        public float SpkCalF2 { get; set; } = 24000f;
+        public int SpkCalRate { get; set; } = 48000;
+        public long SpkCalTimeTicks { get; set; } = 0;
+        public float[] SpkCalGridHz { get; set; } = null;
+        public float[] SpkCalMeasL { get; set; } = null;
+        public float[] SpkCalMeasR { get; set; } = null;
+
         // 后处理 PEQ（输出调音；8 带，左右同参）
         public bool PostEnabled { get; set; } = false;
         public bool[] PostOn { get; set; } = null;

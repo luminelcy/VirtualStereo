@@ -34,6 +34,7 @@ namespace VirtualStereo.Desktop
             new PanelDef { Id = Page.Calibration, Title = "校准", Subtitle = "扫频 · 频响拉平", Draw = DrawCalibrationPanel },
             new PanelDef { Id = Page.PostProcess, Title = "后处理", Subtitle = "输出 PEQ · 曲线", Draw = DrawPostPanel },
             new PanelDef { Id = Page.Room, Title = "听音室", Subtitle = "房间 · 反射 · 混响", Draw = DrawRoomPanel },
+            new PanelDef { Id = Page.SpeakerCal, Title = "音箱校准", Subtitle = "每箱扫频 · 源端补偿", Draw = DrawSpeakerCalPanel },
         };
 
         private struct Row
@@ -818,6 +819,18 @@ namespace VirtualStereo.Desktop
                 cal.Redesign();
                 cal.DesignDirty = false;
             }
+
+            var spk = app.SpkCal;
+            if (spk.State == SpeakerCal.Done)
+            {
+                spk.State = SpeakerCal.Analyzing;
+                System.Threading.Tasks.Task.Run(() => spk.Analyze());
+            }
+            else if (spk.HasCurve && spk.DesignDirty && !spk.IsBusy)
+            {
+                spk.Redesign();
+                spk.DesignDirty = false;
+            }
         }
 
         private static void DrawCalibrationPanel(DesktopApp app)
@@ -1290,6 +1303,77 @@ namespace VirtualStereo.Desktop
             return bx > -0.01f && bx < w + 0.01f
                 && by > -0.01f && by < h + 0.01f
                 && bz > -0.01f && bz < d + 0.01f;
+        }
+
+        // ───────────────────────── 音箱校准面板 ─────────────────────────
+
+        private static void DrawSpeakerCalPanel(DesktopApp app)
+        {
+            var cal = app.SpkCal;
+
+            ImGui.Text("音箱校准（每只音箱单独扫频测到两耳，补偿到源端）");
+            ImGui.TextDisabled("测量时旁路 HRTF（房间反射保留）——拉平的是音箱本身：指向性/距离/房间的染色");
+            ImGui.TextDisabled("HRTF 叠在补偿之后不受影响 → 双耳线索原样保留；改指向性/摆位/房间后需重校");
+
+            if (cal.IsBusy)
+            {
+                if (ImGui.Button("取消校准")) app.CancelSpeakerCalibration();
+                ImGui.SameLine();
+                ImGui.ProgressBar(cal.Progress, new Vector2(240, 18), "");
+                ImGui.SameLine();
+                ImGui.Text(cal.State == SpeakerCal.Analyzing
+                    ? "分析中..."
+                    : (cal.State == SpeakerCal.SweepL ? "左音箱" : "右音箱")
+                        + $" 扫频 {cal.Progress * 100:F0}%  {cal.CurFreq:F0}Hz");
+            }
+            else
+            {
+                if (ImGui.Button("开始校准"))
+                {
+                    string e = app.StartSpeakerCalibration();
+                    _status = e ?? $"音箱校准中 {cal.MeasF1:F0}..{cal.MeasF2:F0}Hz — 左箱扫完扫右箱，注意音量";
+                }
+                ImGui.SameLine();
+                ImGui.Text(cal.HasCurve && cal.DoneAtTicks > 0
+                    ? "上次校准: " + new DateTime(cal.DoneAtTicks).ToString("yyyy-MM-dd HH:mm:ss")
+                    : (cal.HasCurve ? "已有测量曲线" : "未校准过"));
+            }
+            if (cal.Message.Length > 0)
+                ImGui.TextColored(new Vector4(1f, 0.55f, 0.35f, 1f), cal.Message);
+
+            ImGui.Spacing();
+            bool en = cal.Enabled;
+            if (ImGui.Checkbox("应用音箱校准（源端补偿）", ref en)) cal.SetEnabled(en);
+
+            float sm = cal.SmoothOct;
+            ImGui.SetNextItemWidth(180);
+            if (ImGui.SliderFloat("平滑##spk", ref sm, 0.083f, 1f, "%.3f 倍频程"))
+            {
+                cal.SmoothOct = sm;
+                cal.DesignDirty = true;
+            }
+            ImGui.SameLine();
+            float mb = cal.MaxBoostDb;
+            ImGui.SetNextItemWidth(180);
+            if (ImGui.SliderFloat("提升上限##spk", ref mb, 0f, 12f, "%.1f dB"))
+            {
+                cal.MaxBoostDb = mb;
+                cal.DesignDirty = true;
+            }
+            ImGui.SameLine();
+            ImGui.TextDisabled("改动即时重算，不用重扫");
+
+            if (!cal.HasCurve)
+            {
+                ImGui.Spacing();
+                ImGui.TextDisabled("点「开始校准」后自动完成：左音箱扫频 -> 右音箱扫频 -> 每箱出一条曲线");
+                return;
+            }
+
+            ImGui.Spacing();
+            ImGui.Text("每箱频响（两耳 dB 平均；纵 -36..+18 dB；实测=蓝/红，EQ=绿，补偿后预期=白）");
+            DrawCalBox(cal.GridHz, cal.DispSrcL, cal.CorrSrcL, cal.PredSrcL, Col(80, 150, 255), "L箱");
+            DrawCalBox(cal.GridHz, cal.DispSrcR, cal.CorrSrcR, cal.PredSrcR, Col(255, 95, 90), "R箱");
         }
 
         // ───────────────────────── 共用 ─────────────────────────
