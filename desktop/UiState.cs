@@ -14,11 +14,11 @@ namespace VirtualStereo.Desktop
     internal enum Page
     {
         Main = 0,        // 主面板：音源（进程树）与运行状态
-        Processing = 1,  // 处理：前置/后置增益、电平
-        Spatial = 2,     // 空间模拟：模式、方位、HRTF/SOFA
-        Speakers = 3,    // 音箱设置：分频指向性、朝向
+        Processing = 1,  // 处理：前置/后置增益、电平、人头两耳
+        Spatial = 2,     // 空间模拟：模式、几何、HRTF/SOFA、摆位图
+        Speakers = 3,    // 音箱设置：分频指向性、图案
+        Analysis = 4,    // 两耳分析：波形（ITD）/ 频谱
         // ── 未来的家 ──
-        // Spectrum = 4,   // 频谱/波形分析
         // Recording = 5,  // 录制与回放
         // Compare = 6,    // A/B 对比
     }

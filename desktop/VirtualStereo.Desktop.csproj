@@ -19,6 +19,7 @@
 		<Compile Include="Program.cs" />
 		<Compile Include="DesktopApp.cs" />
 		<Compile Include="EarMonitor.cs" />
+		<Compile Include="Fft.cs" />
 		<Compile Include="Settings.cs" />
 		<Compile Include="Ui.cs" />
 		<Compile Include="UiState.cs" />

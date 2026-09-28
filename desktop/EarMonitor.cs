@@ -29,14 +29,43 @@ namespace VirtualStereo.Desktop
         private int _rate = 48000;
         private float[] _scratch = new float[8192];
 
+        // 滚动波形缓冲（供分析面板取最近一段；2 的幂便于掩码/FFT）
+        public const int WaveLen = 8192;
+        private readonly float[] _waveL = new float[WaveLen];
+        private readonly float[] _waveR = new float[WaveLen];
+        private int _wavePos;
+        private volatile int _rateNow = 48000;
+
+        public int Rate => _rateNow;
+
+        /// <summary>取最近 n 个样本（按时间顺序）。n 不超过 WaveLen。</summary>
+        public void Snapshot(float[] dstL, float[] dstR)
+        {
+            int n = dstL.Length;
+            if (n > WaveLen) n = WaveLen;
+            int mask = WaveLen - 1;
+            int start = (_wavePos - n) & mask;
+            for (int i = 0; i < n; i++)
+            {
+                int k = (start + i) & mask;
+                dstL[i] = _waveL[k];
+                dstR[i] = _waveR[k];
+            }
+        }
+
         /// <summary>音频线程调用：interleaved 交错立体声（[0]=左耳/左声道）。</summary>
         public void Push(float[] interleaved, int frames, int sampleRate)
         {
+            _rateNow = sampleRate;
             float sumL = 0f, sumR = 0f;
             float pkL = PeakL, pkR = PeakR;
+            int mask = WaveLen - 1;
+            int wp = _wavePos;
             for (int i = 0; i < frames; i++)
             {
                 float l = interleaved[i * 2], r = interleaved[i * 2 + 1];
+                _waveL[(wp + i) & mask] = l;
+                _waveR[(wp + i) & mask] = r;
                 sumL += l * l;
                 sumR += r * r;
                 float al = l < 0f ? -l : l;
@@ -44,6 +73,7 @@ namespace VirtualStereo.Desktop
                 if (al > pkL) pkL = al;
                 if (ar > pkR) pkR = ar;
             }
+            _wavePos = (wp + frames) & mask;
             RmsL = (float)Math.Sqrt(sumL / Math.Max(1, frames));
             RmsR = (float)Math.Sqrt(sumR / Math.Max(1, frames));
             PeakL = pkL * 0.985f; // 峰值保持带缓降

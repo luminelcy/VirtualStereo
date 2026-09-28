@@ -30,6 +30,7 @@ namespace VirtualStereo.Desktop
             new PanelDef { Id = Page.Processing, Title = "处理", Subtitle = "前后增益 · 电平", Draw = DrawProcessingPanel },
             new PanelDef { Id = Page.Spatial, Title = "空间模拟", Subtitle = "模式 · 方位 · HRTF", Draw = DrawSpatialPanel },
             new PanelDef { Id = Page.Speakers, Title = "音箱设置", Subtitle = "分频指向性 · 图案", Draw = DrawSpeakersPanel },
+            new PanelDef { Id = Page.Analysis, Title = "两耳分析", Subtitle = "波形 · 频谱", Draw = DrawAnalysisPanel },
         };
 
         private struct Row
@@ -207,10 +208,9 @@ namespace VirtualStereo.Desktop
                 ImGui.TextColored(new System.Numerics.Vector4(1, 0.4f, 0.4f, 1), "播放错误: " + app.PlayerError);
 
             ImGui.Text("输出峰值（后置增益之后）");
-            ImGui.ProgressBar(Math.Min(app.OutPeak, 1.5f) / 1.5f, new System.Numerics.Vector2(-1, 18),
-                $"{app.OutPeak:F3}");
-            if (app.OutPeak > 1f)
-                ImGui.TextColored(new System.Numerics.Vector4(1, 0.4f, 0.4f, 1), "爆电平！");
+            ImGui.ProgressBar(Math.Min(app.OutPeak, 1.5f) / 1.5f, new Vector2(320, 18), "");
+            ImGui.SameLine();
+            ImGui.Text($"{app.OutPeak:F3}" + (app.OutPeak > 1f ? "   爆电平！" : ""));
 
             ImGui.Spacing();
             if (ImGui.Checkbox("静音原声（消双响）", ref _silenceTmp))
@@ -221,13 +221,15 @@ namespace VirtualStereo.Desktop
             ImGui.Text("人头两耳（空间化之后、后置增益之前）");
             var mon = app.Monitor;
             ImGui.PushStyleColor(ImGuiCol.PlotHistogram, new Vector4(0.31f, 0.59f, 1f, 1f));
-            ImGui.ProgressBar(Math.Min(mon.PeakL, 1.5f) / 1.5f, new Vector2(-1, 16),
-                $"L耳   RMS {mon.RmsL:F4}   峰 {mon.PeakL:F3}");
+            ImGui.ProgressBar(Math.Min(mon.PeakL, 1.5f) / 1.5f, new Vector2(320, 16), "");
             ImGui.PopStyleColor();
+            ImGui.SameLine();
+            ImGui.Text($"L耳   RMS {mon.RmsL:F4}   峰 {mon.PeakL:F3}");
             ImGui.PushStyleColor(ImGuiCol.PlotHistogram, new Vector4(1f, 0.37f, 0.35f, 1f));
-            ImGui.ProgressBar(Math.Min(mon.PeakR, 1.5f) / 1.5f, new Vector2(-1, 16),
-                $"R耳   RMS {mon.RmsR:F4}   峰 {mon.PeakR:F3}");
+            ImGui.ProgressBar(Math.Min(mon.PeakR, 1.5f) / 1.5f, new Vector2(320, 16), "");
             ImGui.PopStyleColor();
+            ImGui.SameLine();
+            ImGui.Text($"R耳   RMS {mon.RmsR:F4}   峰 {mon.PeakR:F3}");
             float diff = EarDiffDb(mon.RmsL, mon.RmsR);
             ImGui.Text("耳间声级差 (L-R): " + diff.ToString("+0.0;-0.0;0.0", CultureInfo.InvariantCulture) + " dB");
 
@@ -645,6 +647,150 @@ namespace VirtualStereo.Desktop
             ImGui.SameLine();
             ImGui.SetNextItemWidth(150);
             ImGui.SliderFloat(label + " 锐度##p" + band, ref p[band], 0.3f, 4f, "%.1f");
+        }
+
+        // ───────────────────────── 两耳分析面板（波形 / 频谱） ─────────────────────────
+
+        private const int SpecN = 2048;
+        private static readonly float[] _wL = new float[SpecN];
+        private static readonly float[] _wR = new float[SpecN];
+        private static readonly float[] _fftRe = new float[SpecN];
+        private static readonly float[] _fftIm = new float[SpecN];
+        private static readonly float[] _specL = new float[SpecN / 2];
+        private static readonly float[] _specR = new float[SpecN / 2];
+        private static long _nextSpecAt;
+
+        private static void DrawAnalysisPanel(DesktopApp app)
+        {
+            var mon = app.Monitor;
+            mon.Snapshot(_wL, _wR);
+
+            float ms = SpecN * 1000f / Math.Max(1, mon.Rate);
+            ImGui.Text($"两耳波形（滚动 {ms:F0} ms；蓝 L耳 / 红 R耳）");
+            ImGui.TextDisabled("水平错位 = 时间差 ITD；上下幅度差 = 声级差 ILD");
+            DrawWaveBox();
+
+            ImGui.Spacing();
+            ImGui.Text("每耳频谱（2048 点 Hann；纵 -90..0 dB，横 20Hz..Nyquist 对数）");
+            if (Environment.TickCount64 >= _nextSpecAt)
+            {
+                _nextSpecAt = Environment.TickCount64 + 100;
+                ComputeSpectrum(_wL, _specL);
+                ComputeSpectrum(_wR, _specR);
+            }
+            DrawSpecBox(mon.Rate);
+        }
+
+        private static void DrawWaveBox()
+        {
+            float w = Math.Min(900f, Math.Max(360f, ImGui.GetContentRegionAvail().X));
+            const float h = 190f;
+            Vector2 origin = ImGui.GetCursorScreenPos();
+            ImGui.Dummy(new Vector2(w, h));
+            var dl = ImGui.GetWindowDrawList();
+            dl.AddRectFilled(origin, origin + new Vector2(w, h), Col(24, 24, 30));
+            dl.AddRect(origin, origin + new Vector2(w, h), Col(60, 60, 70));
+            float midY = origin.Y + h / 2f;
+            dl.AddLine(new Vector2(origin.X, midY), new Vector2(origin.X + w, midY), Col(45, 48, 58));
+
+            // 自动缩放到峰值（下限 0.1 满刻度，安静内容也看得见形状）
+            float peak = 0.1f;
+            for (int i = 0; i < SpecN; i += 4)
+            {
+                float a = Math.Abs(_wL[i]);
+                float b = Math.Abs(_wR[i]);
+                if (a > peak) peak = a;
+                if (b > peak) peak = b;
+            }
+            float scale = h * 0.46f / peak;
+
+            DrawWaveTrace(dl, origin, w, h, _wL, Col(80, 150, 255), scale);
+            DrawWaveTrace(dl, origin, w, h, _wR, Col(255, 95, 90), scale);
+            dl.AddText(new Vector2(origin.X + 6, origin.Y + 4), Col(120, 125, 140), "+/-" + peak.ToString("F2", CultureInfo.InvariantCulture));
+        }
+
+        private static void DrawWaveTrace(ImDrawListPtr dl, Vector2 origin, float w, float h,
+            float[] data, uint col, float scale)
+        {
+            float midY = origin.Y + h / 2f;
+            var prev = new Vector2(origin.X, midY - data[0] * scale);
+            const int step = 4; // 2048 点 -> 512 段
+            for (int i = step; i < SpecN; i += step)
+            {
+                var cur = new Vector2(origin.X + w * i / (SpecN - 1), midY - data[i] * scale);
+                dl.AddLine(prev, cur, col, 1.2f);
+                prev = cur;
+            }
+        }
+
+        private static void DrawSpecBox(int rate)
+        {
+            float w = Math.Min(900f, Math.Max(360f, ImGui.GetContentRegionAvail().X));
+            const float h = 220f;
+            Vector2 origin = ImGui.GetCursorScreenPos();
+            ImGui.Dummy(new Vector2(w, h));
+            var dl = ImGui.GetWindowDrawList();
+            dl.AddRectFilled(origin, origin + new Vector2(w, h), Col(24, 24, 30));
+            dl.AddRect(origin, origin + new Vector2(w, h), Col(60, 60, 70));
+
+            float nyq = Math.Max(40f, rate * 0.5f);
+            float lo = (float)Math.Log10(20f);
+            float hi = (float)Math.Log10(nyq);
+
+            foreach (int f in new[] { 100, 1000, 10000 })
+            {
+                if (f >= nyq) continue;
+                float x = origin.X + w * ((float)Math.Log10(f) - lo) / (hi - lo);
+                dl.AddLine(new Vector2(x, origin.Y), new Vector2(x, origin.Y + h), Col(45, 48, 58));
+                string lbl = f >= 1000 ? (f / 1000) + "k" : f.ToString(CultureInfo.InvariantCulture);
+                dl.AddText(new Vector2(x + 3, origin.Y + h - 16), Col(95, 100, 115), lbl);
+            }
+            foreach (int db in new[] { 0, -30, -60 })
+            {
+                float y = origin.Y + h * (0f - db) / 90f;
+                dl.AddLine(new Vector2(origin.X, y), new Vector2(origin.X + w, y), Col(45, 48, 58));
+                dl.AddText(new Vector2(origin.X + 4, y + 2), Col(95, 100, 115), db.ToString(CultureInfo.InvariantCulture));
+            }
+
+            DrawSpecTrace(dl, origin, w, h, _specL, Col(80, 150, 255), lo, hi, nyq);
+            DrawSpecTrace(dl, origin, w, h, _specR, Col(255, 95, 90), lo, hi, nyq);
+        }
+
+        private static void DrawSpecTrace(ImDrawListPtr dl, Vector2 origin, float w, float h,
+            float[] spec, uint col, float lo, float hi, float nyq)
+        {
+            int bins = spec.Length;
+            var prev = new Vector2(origin.X, origin.Y + h);
+            for (int x = 1; x < (int)w; x++)
+            {
+                float f = (float)Math.Pow(10.0, lo + (hi - lo) * x / w);
+                int bin = (int)(f / nyq * (bins - 1));
+                if (bin >= bins) bin = bins - 1;
+                float db = spec[bin];
+                if (db < -90f) db = -90f;
+                if (db > 0f) db = 0f;
+                var p = new Vector2(origin.X + x, origin.Y + h * (0f - db) / 90f);
+                dl.AddLine(prev, p, col, 1.2f);
+                prev = p;
+            }
+        }
+
+        private static void ComputeSpectrum(float[] src, float[] dst)
+        {
+            for (int i = 0; i < SpecN; i++)
+            {
+                double hann = 0.5 * (1.0 - Math.Cos(2.0 * Math.PI * i / (SpecN - 1)));
+                _fftRe[i] = src[i] * (float)hann;
+                _fftIm[i] = 0f;
+            }
+            Fft.Forward(_fftRe, _fftIm);
+            int bins = SpecN / 2;
+            float norm = 2f / SpecN;
+            for (int k = 0; k < bins; k++)
+            {
+                float m = (float)Math.Sqrt(_fftRe[k] * _fftRe[k] + _fftIm[k] * _fftIm[k]) * norm;
+                dst[k] = 20f * (float)Math.Log10(Math.Max(1e-7f, m));
+            }
         }
 
         // ───────────────────────── 共用 ─────────────────────────
