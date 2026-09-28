@@ -21,6 +21,13 @@ namespace VirtualStereo.Desktop
         public float ElR { get; set; } = 0f;
         public float DistL { get; set; } = 2f;
         public float DistR { get; set; } = 2f;
+        // 音箱朝向（每源独立；mode 0=朝向听者 1=固定朝前 2=手动）
+        public int AimModeL { get; set; } = 0;
+        public int AimModeR { get; set; } = 0;
+        public float AimAzL { get; set; } = 0f;
+        public float AimElL { get; set; } = 0f;
+        public float AimAzR { get; set; } = 0f;
+        public float AimElR { get; set; } = 0f;
         public int Interpolation { get; set; } = 1;
         public string SofaPath { get; set; } = "";
 
@@ -35,9 +42,6 @@ namespace VirtualStereo.Desktop
         public float[] DirFreqs { get; set; } = { 125f, 350f, 1000f, 3000f, 10000f };
         public float[] DirW { get; set; } = { 0f, 0f, 0f, 0f, 0f, 0f };
         public float[] DirP { get; set; } = { 1f, 1f, 1f, 1f, 1f, 1f };
-        public int DirAim { get; set; } = 0;
-        public float DirAimAz { get; set; } = 0f;
-        public float DirAimEl { get; set; } = 0f;
 
         // 窗口
         public int WindowX { get; set; } = 80;

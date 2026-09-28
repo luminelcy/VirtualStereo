@@ -54,8 +54,6 @@ namespace VirtualStereo.Dsp
         public const float MaxFreq = 16000f;
 
         public volatile bool Enabled;
-        public volatile int Aim = (int)AimMode.TowardListener;
-        public volatile float AimAz = 0f, AimEl = 0f; // 手动朝向（头坐标系角度）
 
         // 分频点（对数分布默认）与每带图案参数（元素级并发读写为良性竞争）
         public readonly float[] Freqs = { 125f, 350f, 1000f, 3000f, 10000f };
@@ -66,13 +64,15 @@ namespace VirtualStereo.Dsp
 
         public DirectivityState CreateState() => new DirectivityState();
 
-        /// <summary>处理一块单声道（就地）。state = 该声源独享的滤波状态。</summary>
+        /// <summary>处理一块单声道（就地）。state = 该声源独享的滤波状态。
+        /// 朝向每源独立：aimMode/aimAz/aimEl 决定该音箱的指向。</summary>
         public void Process(DirectivityState state, float[] mono, int frames,
-            float sampleRate, float srcAzDeg, float srcElDeg)
+            float sampleRate, float srcAzDeg, float srcElDeg,
+            int aimMode, float aimAz, float aimEl)
         {
             if (!Enabled) return;
             RefreshCoeffs(state, sampleRate);
-            GainsInto(srcAzDeg, srcElDeg, _g);
+            GainsInto(srcAzDeg, srcElDeg, aimMode, aimAz, aimEl, _g);
 
             for (int i = 0; i < frames; i++)
             {
@@ -91,9 +91,10 @@ namespace VirtualStereo.Dsp
         }
 
         /// <summary>某方向的分带增益（供 UI 实时显示；dst 长度 = Bands）。</summary>
-        public void GainsAt(float srcAzDeg, float srcElDeg, float[] dst)
+        public void GainsAt(float srcAzDeg, float srcElDeg,
+            int aimMode, float aimAz, float aimEl, float[] dst)
         {
-            GainsInto(srcAzDeg, srcElDeg, dst);
+            GainsInto(srcAzDeg, srcElDeg, aimMode, aimAz, aimEl, dst);
         }
 
         /// <summary>按端点渐变填充各带 (w, p)：i/(Bands-1) 线性插值（"更均匀"的省事做法）。</summary>
@@ -107,10 +108,11 @@ namespace VirtualStereo.Dsp
             }
         }
 
-        private void GainsInto(float srcAzDeg, float srcElDeg, float[] dst)
+        private void GainsInto(float srcAzDeg, float srcElDeg,
+            int aimMode, float aimAz, float aimEl, float[] dst)
         {
             DirFromAngles(srcAzDeg, srcElDeg, out float dx, out float dy, out float dz);
-            GetAim(dx, dy, dz, out float ax, out float ay, out float az);
+            GetAim(aimMode, aimAz, aimEl, dx, dy, dz, out float ax, out float ay, out float az);
             float cosT = ax * -dx + ay * -dy + az * -dz;
             if (cosT > 1f) cosT = 1f;
             if (cosT < -1f) cosT = -1f;
@@ -127,9 +129,10 @@ namespace VirtualStereo.Dsp
             return (float)Math.Pow(v, p);
         }
 
-        private void GetAim(float dx, float dy, float dz, out float ax, out float ay, out float az)
+        private static void GetAim(int aimMode, float aimAz, float aimEl,
+            float dx, float dy, float dz, out float ax, out float ay, out float az)
         {
-            switch ((AimMode)Aim)
+            switch ((AimMode)aimMode)
             {
                 case AimMode.TowardListener: // 朝向听者 = 反向源方向，θ 恒 0
                     ax = -dx; ay = -dy; az = -dz;
@@ -138,7 +141,7 @@ namespace VirtualStereo.Dsp
                     ax = 0f; ay = 0f; az = 1f;
                     break;
                 default: // 手动
-                    DirFromAngles(AimAz, AimEl, out ax, out ay, out az);
+                    DirFromAngles(aimAz, aimEl, out ax, out ay, out az);
                     break;
             }
         }

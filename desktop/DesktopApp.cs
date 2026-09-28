@@ -18,6 +18,9 @@ namespace VirtualStereo.Desktop
         public volatile float PostGainDb = 0f;   // 模拟之后（输出电平）
         public volatile float AzL = -30f, AzR = 30f, ElL = 0f, ElR = 0f;
         public volatile float DistL = 2f, DistR = 2f; // 音箱距离（米；2m 为参考，反比衰减）
+        // 音箱朝向（每源独立；mode: 0=朝向听者 1=固定朝前 2=手动）
+        public volatile int AimModeL = 0, AimModeR = 0;
+        public volatile float AimAzL = 0f, AimElL = 0f, AimAzR = 0f, AimElR = 0f;
         public volatile int Interpolation = 1; // 0 最近邻 / 1 双线性
         public volatile bool SilenceOriginal = true;
 
@@ -137,11 +140,11 @@ namespace VirtualStereo.Desktop
             float g = (float)Math.Pow(10.0, PreGainDb / 20.0);
             for (int i = 0; i < Chunk; i++) { _monoL[i] *= g; _monoR[i] *= g; }
 
-            // 音箱指向性（分频）：前置增益之后、空间模拟之前
+            // 音箱指向性（分频）：前置增益之后、空间模拟之前（朝向每源独立）
             if (Directivity.Enabled)
             {
-                Directivity.Process(_dirStateL, _monoL, Chunk, rate, AzL, ElL);
-                Directivity.Process(_dirStateR, _monoR, Chunk, rate, AzR, ElR);
+                Directivity.Process(_dirStateL, _monoL, Chunk, rate, AzL, ElL, AimModeL, AimAzL, AimElL);
+                Directivity.Process(_dirStateR, _monoR, Chunk, rate, AzR, ElR, AimModeR, AimAzR, AimElR);
             }
 
             // 音箱距离衰减：声学反比（2m 参考，距离每翻倍 -6dB）

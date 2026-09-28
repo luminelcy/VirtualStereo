@@ -58,9 +58,12 @@ if (settings.DirW != null && settings.DirW.Length == DirectivityProcessor.Bands)
     for (int i = 0; i < DirectivityProcessor.Bands; i++) app.Directivity.W[i] = settings.DirW[i];
 if (settings.DirP != null && settings.DirP.Length == DirectivityProcessor.Bands)
     for (int i = 0; i < DirectivityProcessor.Bands; i++) app.Directivity.P[i] = settings.DirP[i];
-app.Directivity.Aim = settings.DirAim;
-app.Directivity.AimAz = settings.DirAimAz;
-app.Directivity.AimEl = settings.DirAimEl;
+app.AimModeL = settings.AimModeL;
+app.AimModeR = settings.AimModeR;
+app.AimAzL = settings.AimAzL;
+app.AimElL = settings.AimElL;
+app.AimAzR = settings.AimAzR;
+app.AimElR = settings.AimElR;
 Ui.Init(settings);
 
 void SaveSettings()
@@ -81,9 +84,12 @@ void SaveSettings()
     settings.DirFreqs = (float[])app.Directivity.Freqs.Clone();
     settings.DirW = (float[])app.Directivity.W.Clone();
     settings.DirP = (float[])app.Directivity.P.Clone();
-    settings.DirAim = app.Directivity.Aim;
-    settings.DirAimAz = app.Directivity.AimAz;
-    settings.DirAimEl = app.Directivity.AimEl;
+    settings.AimModeL = app.AimModeL;
+    settings.AimModeR = app.AimModeR;
+    settings.AimAzL = app.AimAzL;
+    settings.AimElL = app.AimElL;
+    settings.AimAzR = app.AimAzR;
+    settings.AimElR = app.AimElR;
     settings.WindowX = window.X;
     settings.WindowY = window.Y;
     settings.WindowW = window.Width;
