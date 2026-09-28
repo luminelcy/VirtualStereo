@@ -48,6 +48,17 @@ namespace VirtualStereo.Desktop
         public int CaptureRate => _capture != null && _capture.SampleRate > 0 ? _capture.SampleRate : 48000;
         public int OutputRate => _outputRate;
 
+        /// <summary>捕获缓冲（毫秒）：延迟诊断用——暂停/跳转"多久才响应"的主体就是它。</summary>
+        public int CaptureBufferMs
+        {
+            get
+            {
+                if (_capture == null) return 0;
+                int lvl = Math.Min(_capture.RingL.Available, _capture.RingR.Available);
+                return lvl * 1000 / Math.Max(1, CaptureRate);
+            }
+        }
+
         // ── 状态读数（音频线程写 / UI 读）──
         public volatile float OutPeak;
         public volatile float OutRms;
@@ -69,6 +80,7 @@ namespace VirtualStereo.Desktop
         private readonly float[] _stereo = new float[Chunk * 2];
         private int _stagePos = Chunk; // == Chunk 表示暂存区已耗尽
         private long _nextSilenceAt;
+        private bool _starved = true; // 读门槛迟滞态（true=出静音等电平）
 
         public string StartCapture(int pid)
         {
@@ -90,6 +102,7 @@ namespace VirtualStereo.Desktop
                 _player = new WasapiPlayer(_outputRate, FillInterleaved);
                 _stagePos = Chunk;
                 _nextSilenceAt = 0;
+                _starved = true; // 等环到安全电平再出声
                 return $"捕获中: pid={pid}  {_outputRate}Hz  播放缓冲 {_player.BufferFrames} 帧";
             }
             catch (Exception e)
@@ -125,6 +138,7 @@ namespace VirtualStereo.Desktop
                 _outputRate = rate;
                 _player = new WasapiPlayer(rate, FillInterleaved);
                 _stagePos = Chunk;
+                _starved = true;
                 return null;
             }
             catch (Exception e)
@@ -178,8 +192,31 @@ namespace VirtualStereo.Desktop
 
             if (cap != null)
             {
-                bool buffered = cap.RingL.Available >= rate / 8 && cap.RingR.Available >= rate / 8;
-                if (buffered)
+                // 溢出保险（仅捕获时钟快于播放时钟时会发生，如跨设备）：环顶到容量
+                // = 常驻 2.7s 延迟（Write 丢最旧、电平钉满）。超 500ms 时砍回 250ms
+                // ——宁可一次内容跳跃，也不要永久大延迟。
+                int lvl = Math.Min(cap.RingL.Available, cap.RingR.Available);
+                if (lvl > rate / 2)
+                {
+                    int drop = lvl - rate / 4;
+                    cap.RingL.Discard(drop);
+                    cap.RingR.Discard(drop);
+                }
+
+                // 读门槛（迟滞，替代旧的 rate/8=125ms 单阈值——125ms 是
+                // "暂停/跳转多久才响应"的主体，太钝）：硬下限 10ms 出静音保护，
+                // 回到 25ms 才恢复读；同引擎时钟下抖动只有 ~10ms，25ms 电平足够吸收。
+                lvl = Math.Min(cap.RingL.Available, cap.RingR.Available);
+                if (_starved)
+                {
+                    if (lvl >= rate / 40) _starved = false;
+                }
+                else if (lvl < rate / 100)
+                {
+                    _starved = true;
+                }
+
+                if (!_starved)
                 {
                     cap.RingL.Read(_monoL, Chunk);
                     cap.RingR.Read(_monoR, Chunk);

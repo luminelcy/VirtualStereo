@@ -207,7 +207,8 @@ namespace VirtualStereo.Desktop
 
             ImGui.Spacing();
             ImGui.Text(app.Capturing
-                ? $"捕获 RMS={app.CaptureRms:F4}  L={app.CaptureL:F4}  R={app.CaptureR:F4}"
+                ? $"捕获 RMS={app.CaptureRms:F4}  L={app.CaptureL:F4}  R={app.CaptureR:F4}   " +
+                  $"捕获缓冲 {app.CaptureBufferMs} ms（暂停/跳转的响应延迟主体）"
                 : "未捕获");
             if (app.PlayerError != null)
                 ImGui.TextColored(new System.Numerics.Vector4(1, 0.4f, 0.4f, 1), "播放错误: " + app.PlayerError);

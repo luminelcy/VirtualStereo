@@ -64,6 +64,18 @@ namespace VirtualStereo.Capture
             return n;
         }
 
+        /// <summary>消费侧丢弃最旧的 n 个样本（延迟纠正：捕获时钟快于播放时钟时把环砍回目标电平）。</summary>
+        public void Discard(int n)
+        {
+            if (n <= 0) return;
+            long r = _read;
+            long w = Volatile.Read(ref _write);
+            long avail = w - r;
+            if (avail <= 0) return;
+            if (n > avail) n = (int)avail;
+            Volatile.Write(ref _read, r + n);
+        }
+
         /// <summary>丢弃缓冲内容。</summary>
         public void Clear()
         {

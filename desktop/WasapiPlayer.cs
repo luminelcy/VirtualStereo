@@ -67,7 +67,9 @@ namespace VirtualStereo.Desktop
                     hr = _client.Initialize(
                         NativeConst.AUDCLNT_SHAREMODE_SHARED,
                         NativeConst.AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-                        200000 /* 20ms */, 0, pFmt, IntPtr.Zero);
+                        100000 /* 10ms：引擎通常分配2×=20ms；每3ms轮询补满，
+                                 常驻padding≈BufferFrames——这是延迟的第二块大头，20ms请求会拿40ms */,
+                        0, pFmt, IntPtr.Zero);
                     if (hr != HResult.S_OK)
                         throw new InvalidOperationException($"IAudioClient.Initialize 失败: 0x{hr:X8}");
                 }
