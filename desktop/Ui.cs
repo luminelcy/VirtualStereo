@@ -1,8 +1,8 @@
-// ImGui 界面（中文用系统雅黑字体）。一帧绘制全部面板：
-//   音源（进程树 + 发声标记 + 窗口标题） / 输出与电平 / 空间化（模式·增益·声源方位·SOFA）
+// ImGui 界面：左侧导航 + 面板内容区（状态机见 UiState.cs）。
 //
-// 进程选择器按"程序集 = 进程树"组织（一个程序可能是多个进程，如宿主+子进程），
-// 选中任意节点即捕获该节点的整个子进程树；♪ = 该进程当前有活跃音频会话。
+// 结构：Panels 注册表 = 全部面板（标题/小字/绘制函数）；导航由注册表生成，
+// 加功能 = Page 枚举 + 注册表一行，见 UiState.cs 头注释。
+// 中文用系统雅黑字体；♪ 字形缺失故发声标记用 [响]。
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -11,8 +11,24 @@ using VirtualStereo.Capture;
 
 namespace VirtualStereo.Desktop
 {
+    internal sealed class PanelDef
+    {
+        public Page Id;
+        public string Title;
+        public string Subtitle;
+        public Action<DesktopApp> Draw;
+    }
+
     internal static class Ui
     {
+        // ── 面板注册表：新增面板在这里加一行 + 写一个 Draw*Panel ──
+        private static readonly PanelDef[] Panels =
+        {
+            new PanelDef { Id = Page.Main, Title = "主面板", Subtitle = "音源与运行状态", Draw = DrawMainPanel },
+            new PanelDef { Id = Page.Processing, Title = "处理", Subtitle = "前后增益 · 电平", Draw = DrawProcessingPanel },
+            new PanelDef { Id = Page.Spatial, Title = "空间模拟", Subtitle = "模式 · 方位 · HRTF", Draw = DrawSpatialPanel },
+        };
+
         private struct Row
         {
             public int Pid;
@@ -40,39 +56,74 @@ namespace VirtualStereo.Desktop
             _cfg = s;
             _sofaPath = s.SofaPath ?? "";
             _pendingName = s.LastProcessName ?? "";
+            // 恢复上次停留的面板（越界回退主面板）
+            UiState.Current = s.LastPage >= 0 && s.LastPage < Panels.Length
+                ? (Page)s.LastPage
+                : Page.Main;
         }
+
+        // ───────────────────────── 主框架 ─────────────────────────
 
         public static void Draw(DesktopApp app)
         {
             // 铺满视口的固定宿主：无标题栏/不可拖/不可折叠——
-            // 内窗口若可拖动，拖出外窗口可视区就找不回来（用户实测反馈）
+            // 可拖的内窗口拖出外层视口就找不回来（实测反馈）
             var io = ImGui.GetIO();
             ImGui.SetNextWindowPos(System.Numerics.Vector2.Zero);
             ImGui.SetNextWindowSize(io.DisplaySize);
             ImGui.Begin("##host", ImGuiWindowFlags.NoDecoration | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoSavedSettings);
 
-            float srcH = Math.Max(160f, io.DisplaySize.Y * 0.32f);
-            DrawSourcePanel(app, srcH);
-            ImGui.Separator();
-
-            // 处理 | 空间模拟 两个独立面板
-            float panelH = Math.Max(300f, io.DisplaySize.Y - srcH - 230f);
-            float half = (ImGui.GetContentRegionAvail().X - 8f) / 2f;
-            ImGui.BeginChild("##processing", new System.Numerics.Vector2(half, panelH), true);
-            DrawProcessingPanel(app);
-            ImGui.EndChild();
+            DrawSidebar();
             ImGui.SameLine();
-            ImGui.BeginChild("##spatial", new System.Numerics.Vector2(0, panelH), true);
-            DrawSpatialPanel(app);
-            ImGui.EndChild();
+            DrawContent(app);
 
-            ImGui.TextWrapped(_status);
             ImGui.End();
         }
 
-        // ─────────────── 音源（进程树选择器） ───────────────
+        private static void DrawSidebar()
+        {
+            ImGui.BeginChild("##nav", new System.Numerics.Vector2(180, -1), true);
+            ImGui.Text("VirtualStereo");
+            ImGui.TextDisabled("实验平台");
+            ImGui.Separator();
 
-        private static void DrawSourcePanel(DesktopApp app, float listHeight)
+            foreach (var p in Panels)
+            {
+                bool active = p.Id == UiState.Current;
+                if (ImGui.Selectable(p.Title + "##nav" + (int)p.Id, active, 0, new System.Numerics.Vector2(-1, 38)))
+                {
+                    UiState.Go(p.Id);
+                    if (_cfg != null) _cfg.LastPage = (int)p.Id;
+                }
+                if (active)
+                    ImGui.TextDisabled(p.Subtitle);
+            }
+
+            ImGui.EndChild();
+        }
+
+        private static void DrawContent(DesktopApp app)
+        {
+            ImGui.BeginChild("##content", new System.Numerics.Vector2(0, -1), false);
+
+            PanelDef panel = Panels[0];
+            foreach (var p in Panels)
+                if (p.Id == UiState.Current) panel = p;
+
+            ImGui.Text(panel.Title);
+            ImGui.TextDisabled(panel.Subtitle);
+            ImGui.Separator();
+
+            panel.Draw(app);
+
+            ImGui.Separator();
+            ImGui.TextWrapped(_status);
+            ImGui.EndChild();
+        }
+
+        // ───────────────────────── 主面板 ─────────────────────────
+
+        private static void DrawMainPanel(DesktopApp app)
         {
             ImGui.Text("音源（程序集=进程树；[响]=正在发声；捕获=选中节点及其子进程）");
             ImGui.InputText("搜索", ref _search, 64);
@@ -94,7 +145,9 @@ namespace VirtualStereo.Desktop
 
             if (Environment.TickCount64 >= _nextScanAt) Rescan(false);
 
-            ImGui.BeginChild("proclist", new System.Numerics.Vector2(-1, listHeight), true);
+            var io = ImGui.GetIO();
+            float listH = Math.Max(160f, io.DisplaySize.Y * 0.42f);
+            ImGui.BeginChild("proclist", new System.Numerics.Vector2(-1, listH), true);
             foreach (var row in _rows)
             {
                 bool selected = row.Pid == _selectedPid;
@@ -108,8 +161,117 @@ namespace VirtualStereo.Desktop
             if (_rows.Count == 0)
                 ImGui.TextDisabled("（没有匹配的进程）");
             ImGui.EndChild();
+
+            ImGui.Spacing();
             ImGui.Text($"选中: {_selectedName}");
+            ImGui.Text(app.Capturing
+                ? $"捕获中 RMS={app.CaptureRms:F4}  L={app.CaptureL:F4}  R={app.CaptureR:F4}"
+                : "未捕获");
+            ImGui.Text($"模式={ModeName(app)}   峰值={app.OutPeak:F3}");
+            ImGui.TextDisabled("增益与电平细节见「处理」；声源方位见「空间模拟」");
         }
+
+        private static string ModeName(DesktopApp app)
+        {
+            switch (app.CurrentMode)
+            {
+                case 1: return "双耳HRTF";
+                case 2: return "ITD+ILD";
+                default: return "直通";
+            }
+        }
+
+        // ───────────────────────── 处理面板 ─────────────────────────
+
+        private static void DrawProcessingPanel(DesktopApp app)
+        {
+            // 前置增益：进空间模拟之前
+            GainRow("前置增益dB##pre", app.PreGainDb, -24f, 12f, v => app.PreGainDb = v, ref _preGainText);
+            ImGui.TextDisabled("↑ 进模拟之前（输入电平）");
+
+            // 后置增益：空间模拟之后、出声之前
+            GainRow("后置增益dB##post", app.PostGainDb, -24f, 12f, v => app.PostGainDb = v, ref _postGainText);
+            ImGui.TextDisabled("↑ 模拟之后（输出电平）");
+
+            ImGui.Spacing();
+            ImGui.Text(app.Capturing
+                ? $"捕获 RMS={app.CaptureRms:F4}  L={app.CaptureL:F4}  R={app.CaptureR:F4}"
+                : "未捕获");
+            if (app.PlayerError != null)
+                ImGui.TextColored(new System.Numerics.Vector4(1, 0.4f, 0.4f, 1), "播放错误: " + app.PlayerError);
+
+            ImGui.Text("输出峰值（后置增益之后）");
+            ImGui.ProgressBar(Math.Min(app.OutPeak, 1.5f) / 1.5f, new System.Numerics.Vector2(-1, 18),
+                $"{app.OutPeak:F3}");
+            if (app.OutPeak > 1f)
+                ImGui.TextColored(new System.Numerics.Vector4(1, 0.4f, 0.4f, 1), "← 爆电平");
+
+            ImGui.Spacing();
+            if (ImGui.Checkbox("静音原声（ε，消双响）", ref _silenceTmp))
+                app.SilenceOriginal = _silenceTmp;
+        }
+
+        /// <summary>增益行：滑条 + 文本框（Ctrl+点滑条也能输）。</summary>
+        private static void GainRow(string label, float db, float min, float max,
+            Action<float> set, ref string text)
+        {
+            float v = db;
+            ImGui.SetNextItemWidth(180);
+            if (ImGui.SliderFloat(label, ref v, min, max, "%.1f dB")) set(v);
+            ImGui.SameLine();
+            if (text.Length == 0 || Math.Abs(Parse(text) - db) > 0.05f)
+                text = db.ToString("F1", CultureInfo.InvariantCulture);
+            ImGui.SetNextItemWidth(60);
+            if (ImGui.InputText("##t" + label, ref text, 8))
+            {
+                float t = Parse(text);
+                if (!float.IsNaN(t)) set(Math.Clamp(t, min, max));
+            }
+        }
+
+        // ───────────────────────── 空间模拟面板 ─────────────────────────
+
+        private static void DrawSpatialPanel(DesktopApp app)
+        {
+            int mode = app.CurrentMode;
+            if (ImGui.RadioButton("直通", ref mode, 0)) app.CurrentMode = mode;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("双耳HRTF", ref mode, 1)) app.CurrentMode = mode;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("ITD+ILD", ref mode, 2)) app.CurrentMode = mode;
+
+            ImGui.Spacing();
+            ImGui.Text("声源方位（头坐标系：正前方 0°，右正）");
+            float azL = app.AzL, azR = app.AzR, eL = app.ElL, eR = app.ElR;
+            ImGui.SetNextItemWidth(260);
+            if (ImGui.SliderFloat("L 方位角", ref azL, -180f, 180f, "%.0f°")) app.AzL = azL;
+            ImGui.SetNextItemWidth(260);
+            if (ImGui.SliderFloat("R 方位角", ref azR, -180f, 180f, "%.0f°")) app.AzR = azR;
+            ImGui.SetNextItemWidth(260);
+            if (ImGui.SliderFloat("L 仰角", ref eL, -90f, 90f, "%.0f°")) app.ElL = eL;
+            ImGui.SetNextItemWidth(260);
+            if (ImGui.SliderFloat("R 仰角", ref eR, -90f, 90f, "%.0f°")) app.ElR = eR;
+
+            ImGui.Spacing();
+            ImGui.Text("HRTF");
+            int interp = app.Interpolation;
+            if (ImGui.RadioButton("最近邻", ref interp, 0)) { app.Interpolation = interp; app.ApplyInterpolation(); }
+            ImGui.SameLine();
+            if (ImGui.RadioButton("双线性", ref interp, 1)) { app.Interpolation = interp; app.ApplyInterpolation(); }
+
+            ImGui.InputText("SOFA 路径", ref _sofaPath, 400);
+            ImGui.SameLine();
+            if (ImGui.Button("载入SOFA"))
+                _status = app.LoadSofa(_sofaPath) ? "已载入 SOFA: " + _sofaPath : "SOFA 载入失败（路径对吗？）";
+            ImGui.SameLine();
+            if (ImGui.Button("恢复内置"))
+            {
+                app.LoadSofa(null);
+                _status = "已恢复内置 HRTF（CIPIC #124）";
+            }
+        }
+
+        // ───────────────────────── 共用 ─────────────────────────
 
         private static void Rescan(bool force)
         {
@@ -132,9 +294,9 @@ namespace VirtualStereo.Desktop
             var titles = WinEnum.GetWindowTitles();
             var active = AudioSessions.ActivePids();
 
-            // 根 = 父进程不在快照里；深先序遍历成行
+            // 根 = 父进程不在快照里；深先序遍历成行；过滤保留命中行的祖先
             var rows = new List<Row>();
-            var keep = new HashSet<int>(); // 过滤后保留的行（含命中行的祖先）
+            var keep = new HashSet<int>();
 
             void Walk(int pid, int depth)
             {
@@ -184,7 +346,7 @@ namespace VirtualStereo.Desktop
             Dictionary<uint, string> titles, HashSet<int> active)
         {
             string indent = depth == 0 ? "" : new string(' ', depth * 2) + "└ ";
-            // 用 [响] 而不是 ♪：雅黑的字形范围里没有音符字符（实测渲染成 ?）
+            // [响] 而不是 ♪：雅黑字形范围无音符字符（渲染成 ?）
             string badge = active.Contains(p.Pid) ? "[响] " : "     ";
             string title = titles.TryGetValue((uint)p.Pid, out var t) ? " — " + t : "";
             return new Row
@@ -193,98 +355,6 @@ namespace VirtualStereo.Desktop
                 Name = p.Name,
                 Display = indent + badge + p.Name + " [" + p.Pid + "]" + title,
             };
-        }
-
-        // ─────────────── 处理面板（前后增益 · 电平） ───────────────
-
-        private static void DrawProcessingPanel(DesktopApp app)
-        {
-            ImGui.Text("处理");
-
-            // 前置增益：进空间模拟之前
-            GainRow("前置增益dB##pre", app.PreGainDb, -24f, 12f, v => app.PreGainDb = v, ref _preGainText);
-            ImGui.TextDisabled("↑ 进模拟之前（输入电平）");
-
-            // 后置增益：空间模拟之后、出声之前
-            GainRow("后置增益dB##post", app.PostGainDb, -24f, 12f, v => app.PostGainDb = v, ref _postGainText);
-            ImGui.TextDisabled("↑ 模拟之后（输出电平）");
-
-            ImGui.Spacing();
-            ImGui.Text(app.Capturing
-                ? $"捕获 RMS={app.CaptureRms:F4}  L={app.CaptureL:F4}  R={app.CaptureR:F4}"
-                : "未捕获");
-            if (app.PlayerError != null)
-                ImGui.TextColored(new System.Numerics.Vector4(1, 0.4f, 0.4f, 1), "播放错误: " + app.PlayerError);
-
-            ImGui.Text("输出峰值（后置增益之后）");
-            ImGui.ProgressBar(Math.Min(app.OutPeak, 1.5f) / 1.5f, new System.Numerics.Vector2(-1, 18),
-                $"{app.OutPeak:F3}");
-            if (app.OutPeak > 1f)
-                ImGui.TextColored(new System.Numerics.Vector4(1, 0.4f, 0.4f, 1), "← 爆电平");
-
-            ImGui.Spacing();
-            if (ImGui.Checkbox("静音原声（ε，消双响）", ref _silenceTmp))
-                app.SilenceOriginal = _silenceTmp;
-        }
-
-        /// <summary>增益行：滑条 + 文本框（Ctrl+点滑条也能输）。</summary>
-        private static void GainRow(string label, float db, float min, float max,
-            Action<float> set, ref string text)
-        {
-            float v = db;
-            ImGui.SetNextItemWidth(180);
-            if (ImGui.SliderFloat(label, ref v, min, max, "%.1f dB")) set(v);
-            ImGui.SameLine();
-            if (text.Length == 0 || Math.Abs(Parse(text) - db) > 0.05f)
-                text = db.ToString("F1", CultureInfo.InvariantCulture);
-            ImGui.SetNextItemWidth(60);
-            if (ImGui.InputText("##t" + label, ref text, 8))
-            {
-                float t = Parse(text);
-                if (!float.IsNaN(t)) set(Math.Clamp(t, min, max));
-            }
-        }
-
-        // ─────────────── 空间模拟面板 ───────────────
-
-        private static void DrawSpatialPanel(DesktopApp app)
-        {
-            ImGui.Text("空间模拟");
-
-            int mode = app.CurrentMode;
-            if (ImGui.RadioButton("直通", ref mode, 0)) app.CurrentMode = mode;
-            ImGui.SameLine();
-            if (ImGui.RadioButton("双耳HRTF", ref mode, 1)) app.CurrentMode = mode;
-            ImGui.SameLine();
-            if (ImGui.RadioButton("ITD+ILD", ref mode, 2)) app.CurrentMode = mode;
-
-            // 声源方位（头坐标系：正前方 0°，右正）
-            float azL = app.AzL, azR = app.AzR, eL = app.ElL, eR = app.ElR;
-            ImGui.SetNextItemWidth(260);
-            if (ImGui.SliderFloat("L 方位角", ref azL, -180f, 180f, "%.0f°")) app.AzL = azL;
-            ImGui.SetNextItemWidth(260);
-            if (ImGui.SliderFloat("R 方位角", ref azR, -180f, 180f, "%.0f°")) app.AzR = azR;
-            ImGui.SetNextItemWidth(260);
-            if (ImGui.SliderFloat("L 仰角", ref eL, -90f, 90f, "%.0f°")) app.ElL = eL;
-            ImGui.SetNextItemWidth(260);
-            if (ImGui.SliderFloat("R 仰角", ref eR, -90f, 90f, "%.0f°")) app.ElR = eR;
-
-            // HRTF
-            int interp = app.Interpolation;
-            if (ImGui.RadioButton("最近邻", ref interp, 0)) { app.Interpolation = interp; app.ApplyInterpolation(); }
-            ImGui.SameLine();
-            if (ImGui.RadioButton("双线性", ref interp, 1)) { app.Interpolation = interp; app.ApplyInterpolation(); }
-
-            ImGui.InputText("SOFA 路径", ref _sofaPath, 400);
-            ImGui.SameLine();
-            if (ImGui.Button("载入SOFA"))
-                _status = app.LoadSofa(_sofaPath) ? "已载入 SOFA: " + _sofaPath : "SOFA 载入失败（路径对吗？）";
-            ImGui.SameLine();
-            if (ImGui.Button("恢复内置"))
-            {
-                app.LoadSofa(null);
-                _status = "已恢复内置 HRTF（CIPIC #124）";
-            }
         }
 
         private static float Parse(string s)

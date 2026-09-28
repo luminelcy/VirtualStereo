@@ -25,6 +25,9 @@ namespace VirtualStereo.Desktop
         // 音源
         public string LastProcessName { get; set; } = "";
 
+        // 界面
+        public int LastPage { get; set; } = 0;
+
         // 窗口
         public int WindowX { get; set; } = 80;
         public int WindowY { get; set; } = 80;

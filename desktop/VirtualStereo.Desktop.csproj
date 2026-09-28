@@ -20,6 +20,7 @@
 		<Compile Include="DesktopApp.cs" />
 		<Compile Include="Settings.cs" />
 		<Compile Include="Ui.cs" />
+		<Compile Include="UiState.cs" />
 		<Compile Include="WasapiPlayer.cs" />
 		<Compile Include="WinEnum.cs" />
 	</ItemGroup>
