@@ -21,7 +21,10 @@ namespace VirtualStereo.Desktop
         public volatile bool SilenceOriginal = true;
 
         // 音箱指向性（分频模拟频率相关指向性；配置在"音箱设置"面板改）
+        // 注意：滤波状态每声源一份——共用会互相污染滤波器记忆（调制失真）
         public readonly DirectivityProcessor Directivity = new DirectivityProcessor();
+        private readonly DirectivityState _dirStateL = new DirectivityState();
+        private readonly DirectivityState _dirStateR = new DirectivityState();
 
         // ── 状态读数（音频线程写 / UI 读）──
         public volatile float OutPeak;
@@ -136,8 +139,8 @@ namespace VirtualStereo.Desktop
             // 音箱指向性（分频）：前置增益之后、空间模拟之前
             if (Directivity.Enabled)
             {
-                Directivity.Process(_monoL, Chunk, rate, AzL, ElL);
-                Directivity.Process(_monoR, Chunk, rate, AzR, ElR);
+                Directivity.Process(_dirStateL, _monoL, Chunk, rate, AzL, ElL);
+                Directivity.Process(_dirStateR, _monoR, Chunk, rate, AzR, ElR);
             }
 
             lock (_dspLock)

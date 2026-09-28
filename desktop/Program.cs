@@ -49,14 +49,26 @@ app.ElL = settings.ElL;
 app.ElR = settings.ElR;
 app.Interpolation = settings.Interpolation;
 app.Directivity.Enabled = settings.DirEnabled;
-app.Directivity.FreqLowMid = settings.DirFreqLowMid;
-app.Directivity.FreqMidHigh = settings.DirFreqMidHigh;
-app.Directivity.WLow = settings.DirWLow;
-app.Directivity.WMid = settings.DirWMid;
-app.Directivity.WHigh = settings.DirWHigh;
-app.Directivity.PLow = settings.DirPLow;
-app.Directivity.PMid = settings.DirPMid;
-app.Directivity.PHigh = settings.DirPHigh;
+if (settings.DirFreqs != null && settings.DirFreqs.Length == 3)
+{
+    app.Directivity.Freq1 = settings.DirFreqs[0];
+    app.Directivity.Freq2 = settings.DirFreqs[1];
+    app.Directivity.Freq3 = settings.DirFreqs[2];
+}
+if (settings.DirW != null && settings.DirW.Length == 4)
+{
+    app.Directivity.WLow = settings.DirW[0];
+    app.Directivity.WMidLow = settings.DirW[1];
+    app.Directivity.WMidHigh = settings.DirW[2];
+    app.Directivity.WHigh = settings.DirW[3];
+}
+if (settings.DirP != null && settings.DirP.Length == 4)
+{
+    app.Directivity.PLow = settings.DirP[0];
+    app.Directivity.PMidLow = settings.DirP[1];
+    app.Directivity.PMidHigh = settings.DirP[2];
+    app.Directivity.PHigh = settings.DirP[3];
+}
 app.Directivity.Aim = settings.DirAim;
 app.Directivity.AimAz = settings.DirAimAz;
 app.Directivity.AimEl = settings.DirAimEl;
@@ -75,14 +87,9 @@ void SaveSettings()
     settings.Interpolation = app.Interpolation;
     settings.SofaPath = Ui.CurrentSofaPath;
     settings.DirEnabled = app.Directivity.Enabled;
-    settings.DirFreqLowMid = app.Directivity.FreqLowMid;
-    settings.DirFreqMidHigh = app.Directivity.FreqMidHigh;
-    settings.DirWLow = app.Directivity.WLow;
-    settings.DirWMid = app.Directivity.WMid;
-    settings.DirWHigh = app.Directivity.WHigh;
-    settings.DirPLow = app.Directivity.PLow;
-    settings.DirPMid = app.Directivity.PMid;
-    settings.DirPHigh = app.Directivity.PHigh;
+    settings.DirFreqs = new[] { app.Directivity.Freq1, app.Directivity.Freq2, app.Directivity.Freq3 };
+    settings.DirW = new[] { app.Directivity.WLow, app.Directivity.WMidLow, app.Directivity.WMidHigh, app.Directivity.WHigh };
+    settings.DirP = new[] { app.Directivity.PLow, app.Directivity.PMidLow, app.Directivity.PMidHigh, app.Directivity.PHigh };
     settings.DirAim = app.Directivity.Aim;
     settings.DirAimAz = app.Directivity.AimAz;
     settings.DirAimEl = app.Directivity.AimEl;

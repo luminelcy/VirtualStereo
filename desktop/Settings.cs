@@ -28,16 +28,11 @@ namespace VirtualStereo.Desktop
         // 界面
         public int LastPage { get; set; } = 0;
 
-        // 音箱指向性（分频）
+        // 音箱指向性（分频）：3 分频点 / 4 带权重 / 4 带锐度
         public bool DirEnabled { get; set; } = false;
-        public float DirFreqLowMid { get; set; } = 300f;
-        public float DirFreqMidHigh { get; set; } = 2000f;
-        public float DirWLow { get; set; } = 0f;
-        public float DirWMid { get; set; } = 0f;
-        public float DirWHigh { get; set; } = 0f;
-        public float DirPLow { get; set; } = 1f;
-        public float DirPMid { get; set; } = 1f;
-        public float DirPHigh { get; set; } = 1f;
+        public float[] DirFreqs { get; set; } = { 200f, 800f, 3000f };
+        public float[] DirW { get; set; } = { 0f, 0f, 0f, 0f };
+        public float[] DirP { get; set; } = { 1f, 1f, 1f, 1f };
         public int DirAim { get; set; } = 0;
         public float DirAimAz { get; set; } = 0f;
         public float DirAimEl { get; set; } = 0f;
