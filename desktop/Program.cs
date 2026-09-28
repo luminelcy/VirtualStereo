@@ -7,6 +7,7 @@ using Veldrid;
 using Veldrid.StartupUtilities;
 using VirtualStereo;
 using VirtualStereo.Desktop;
+using VirtualStereo.Dsp;
 
 VsLog.OnInfo = s => Console.WriteLine(s);
 VsLog.OnError = s => Console.Error.WriteLine("[E] " + s);
@@ -49,26 +50,12 @@ app.ElL = settings.ElL;
 app.ElR = settings.ElR;
 app.Interpolation = settings.Interpolation;
 app.Directivity.Enabled = settings.DirEnabled;
-if (settings.DirFreqs != null && settings.DirFreqs.Length == 3)
-{
-    app.Directivity.Freq1 = settings.DirFreqs[0];
-    app.Directivity.Freq2 = settings.DirFreqs[1];
-    app.Directivity.Freq3 = settings.DirFreqs[2];
-}
-if (settings.DirW != null && settings.DirW.Length == 4)
-{
-    app.Directivity.WLow = settings.DirW[0];
-    app.Directivity.WMidLow = settings.DirW[1];
-    app.Directivity.WMidHigh = settings.DirW[2];
-    app.Directivity.WHigh = settings.DirW[3];
-}
-if (settings.DirP != null && settings.DirP.Length == 4)
-{
-    app.Directivity.PLow = settings.DirP[0];
-    app.Directivity.PMidLow = settings.DirP[1];
-    app.Directivity.PMidHigh = settings.DirP[2];
-    app.Directivity.PHigh = settings.DirP[3];
-}
+if (settings.DirFreqs != null && settings.DirFreqs.Length == DirectivityProcessor.Splits)
+    for (int i = 0; i < DirectivityProcessor.Splits; i++) app.Directivity.Freqs[i] = settings.DirFreqs[i];
+if (settings.DirW != null && settings.DirW.Length == DirectivityProcessor.Bands)
+    for (int i = 0; i < DirectivityProcessor.Bands; i++) app.Directivity.W[i] = settings.DirW[i];
+if (settings.DirP != null && settings.DirP.Length == DirectivityProcessor.Bands)
+    for (int i = 0; i < DirectivityProcessor.Bands; i++) app.Directivity.P[i] = settings.DirP[i];
 app.Directivity.Aim = settings.DirAim;
 app.Directivity.AimAz = settings.DirAimAz;
 app.Directivity.AimEl = settings.DirAimEl;
@@ -87,9 +74,9 @@ void SaveSettings()
     settings.Interpolation = app.Interpolation;
     settings.SofaPath = Ui.CurrentSofaPath;
     settings.DirEnabled = app.Directivity.Enabled;
-    settings.DirFreqs = new[] { app.Directivity.Freq1, app.Directivity.Freq2, app.Directivity.Freq3 };
-    settings.DirW = new[] { app.Directivity.WLow, app.Directivity.WMidLow, app.Directivity.WMidHigh, app.Directivity.WHigh };
-    settings.DirP = new[] { app.Directivity.PLow, app.Directivity.PMidLow, app.Directivity.PMidHigh, app.Directivity.PHigh };
+    settings.DirFreqs = (float[])app.Directivity.Freqs.Clone();
+    settings.DirW = (float[])app.Directivity.W.Clone();
+    settings.DirP = (float[])app.Directivity.P.Clone();
     settings.DirAim = app.Directivity.Aim;
     settings.DirAimAz = app.Directivity.AimAz;
     settings.DirAimEl = app.Directivity.AimEl;

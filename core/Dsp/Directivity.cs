@@ -1,15 +1,16 @@
-// 音箱指向性（频率相关）：4 分频带 + 加权偶极子图案，公式与 Steam Audio 一致：
+// 音箱指向性（频率相关）：N 分频带 + 加权偶极子图案，公式与 Steam Audio 一致：
 //   g(θ) = |(1−w) + w·cosθ|^p          （directivity.cpp: evaluate()）
 //   w=dipoleWeight: 0=全向 0.5=心形 1=8字；p=dipolePower: 锐度
 //
-// 4 带（低/中低/中高/高）× 3 个分频点：真实喇叭低频绕射强、高频聚拢，
-// 宽带单值图案表达不了——每带独立 (w, p) 求增益再合成。
+// 6 带 × 5 分频点（默认 125/350/1k/3k/10k，对数分布，最高可到 16k）：
+// 真实喇叭低频绕射强、高频聚拢，宽带单值图案表达不了——每带独立 (w, p)
+// 求增益再合成；带间过渡由 Butterworth 互补对的滤波斜率自然平滑。
 //
 // 结构与教训：
 // - 滤波状态必须**每声源一份**（曾共用一套，左右声道互污染滤波器记忆，
 //   产生持续调制失真——"声音不正常"的真凶，不是缓冲区）
-// - 分频用 2 阶 Butterworth 互补对（LP+HP 幅度和恒平），级联出 4 带；
-//   每声源 6 个双二阶，成本微不足道
+// - 分频 = 级联互补分割（每级 LP+HP，幅度和恒平）；每声源 5 级 10 个双二阶，
+//   成本微不足道；将来要更多带时升级分割树/SVF 结构即可
 // - 挂载：前置增益之后、空间模拟之前（声源属性，各空间模式共用）
 using System;
 
@@ -23,32 +24,45 @@ namespace VirtualStereo.Dsp
         Manual = 2,         // 手动角度
     }
 
-    /// <summary>每声源一份的滤波状态（4 带 = 3 级互补分割，6 个双二阶）。</summary>
+    /// <summary>每声源一份的滤波状态（5 级互补分割，10 个双二阶）。</summary>
     internal sealed class DirectivityState
     {
-        internal readonly Biquad Lp1 = new Biquad();
-        internal readonly Biquad Hp1 = new Biquad();
-        internal readonly Biquad Lp2 = new Biquad();
-        internal readonly Biquad Hp2 = new Biquad();
-        internal readonly Biquad Lp3 = new Biquad();
-        internal readonly Biquad Hp3 = new Biquad();
-        internal float AppliedF1 = -1f, AppliedF2 = -1f, AppliedF3 = -1f, AppliedSr;
+        internal readonly Biquad[] Lp;
+        internal readonly Biquad[] Hp;
+        internal readonly float[] AppliedFreq;
+        internal float AppliedSr = -1f;
+
+        public DirectivityState()
+        {
+            Lp = new Biquad[DirectivityProcessor.Splits];
+            Hp = new Biquad[DirectivityProcessor.Splits];
+            AppliedFreq = new float[DirectivityProcessor.Splits];
+            for (int k = 0; k < DirectivityProcessor.Splits; k++)
+            {
+                Lp[k] = new Biquad();
+                Hp[k] = new Biquad();
+                AppliedFreq[k] = -1f;
+            }
+        }
     }
 
     internal sealed class DirectivityProcessor
     {
+        public const int Bands = 6;    // 低 / 中低 / 中中 / 中高 / 次高 / 高
+        public const int Splits = 5;   // 分频点数
+        public const float MinFreq = 60f;
+        public const float MaxFreq = 16000f;
+
         public volatile bool Enabled;
-        public volatile float Freq1 = 200f;   // 低 | 中低
-        public volatile float Freq2 = 800f;   // 中低 | 中高
-        public volatile float Freq3 = 3000f;  // 中高 | 高
-        // 每带 dipoleWeight（0全向/0.5心形/1八字）与 dipolePower（锐度）
-        public volatile float WLow = 0f, WMidLow = 0f, WMidHigh = 0f, WHigh = 0f;
-        public volatile float PLow = 1f, PMidLow = 1f, PMidHigh = 1f, PHigh = 1f;
         public volatile int Aim = (int)AimMode.TowardListener;
         public volatile float AimAz = 0f, AimEl = 0f; // 手动朝向（头坐标系角度）
 
-        public const float MinFreq = 60f;
-        public const float MaxFreq = 8000f;
+        // 分频点（对数分布默认）与每带图案参数（元素级并发读写为良性竞争）
+        public readonly float[] Freqs = { 125f, 350f, 1000f, 3000f, 10000f };
+        public readonly float[] W = { 0f, 0f, 0f, 0f, 0f, 0f };  // 权重
+        public readonly float[] P = { 1f, 1f, 1f, 1f, 1f, 1f };  // 锐度
+
+        private readonly float[] _g = new float[Bands]; // 音频线程 scratch（单线程使用）
 
         public DirectivityState CreateState() => new DirectivityState();
 
@@ -58,36 +72,50 @@ namespace VirtualStereo.Dsp
         {
             if (!Enabled) return;
             RefreshCoeffs(state, sampleRate);
-
-            GainsAt(srcAzDeg, srcElDeg, out float g0, out float g1, out float g2, out float g3);
+            GainsInto(srcAzDeg, srcElDeg, _g);
 
             for (int i = 0; i < frames; i++)
             {
-                float x = mono[i];
-                float hp1 = state.Hp1.Tick(x);
-                float hp2 = state.Hp2.Tick(hp1);
-                float low = state.Lp1.Tick(x);
-                float midLow = state.Lp2.Tick(hp1);
-                float midHigh = state.Lp3.Tick(hp2);
-                float high = state.Hp3.Tick(hp2);
-                mono[i] = low * g0 + midLow * g1 + midHigh * g2 + high * g3;
+                float s = mono[i];
+                float sum = 0f;
+                for (int k = 0; k < Splits; k++)
+                {
+                    float hp = state.Hp[k].Tick(s);
+                    float lp = state.Lp[k].Tick(s);
+                    sum += lp * _g[k];
+                    s = hp;
+                }
+                sum += s * _g[Splits];
+                mono[i] = sum;
             }
         }
 
-        /// <summary>某方向的分带增益（供 UI 实时显示）。</summary>
-        public void GainsAt(float srcAzDeg, float srcElDeg,
-            out float gLow, out float gMidLow, out float gMidHigh, out float gHigh)
+        /// <summary>某方向的分带增益（供 UI 实时显示；dst 长度 = Bands）。</summary>
+        public void GainsAt(float srcAzDeg, float srcElDeg, float[] dst)
+        {
+            GainsInto(srcAzDeg, srcElDeg, dst);
+        }
+
+        /// <summary>按端点渐变填充各带 (w, p)：i/(Bands-1) 线性插值（"更均匀"的省事做法）。</summary>
+        public void FillGradient(float wLow, float pLow, float wHigh, float pHigh)
+        {
+            for (int i = 0; i < Bands; i++)
+            {
+                float t = (float)i / (Bands - 1);
+                W[i] = wLow + (wHigh - wLow) * t;
+                P[i] = pLow + (pHigh - pLow) * t;
+            }
+        }
+
+        private void GainsInto(float srcAzDeg, float srcElDeg, float[] dst)
         {
             DirFromAngles(srcAzDeg, srcElDeg, out float dx, out float dy, out float dz);
             GetAim(dx, dy, dz, out float ax, out float ay, out float az);
             float cosT = ax * -dx + ay * -dy + az * -dz;
             if (cosT > 1f) cosT = 1f;
             if (cosT < -1f) cosT = -1f;
-
-            gLow = Pattern(WLow, PLow, cosT);
-            gMidLow = Pattern(WMidLow, PMidLow, cosT);
-            gMidHigh = Pattern(WMidHigh, PMidHigh, cosT);
-            gHigh = Pattern(WHigh, PHigh, cosT);
+            for (int i = 0; i < Bands; i++)
+                dst[i] = Pattern(W[i], P[i], cosT);
         }
 
         /// <summary>Steam Audio 加权偶极子：| (1−w) + w·cosθ | ^ p，w=0 时恒为 1。</summary>
@@ -127,22 +155,26 @@ namespace VirtualStereo.Dsp
 
         private void RefreshCoeffs(DirectivityState st, float sampleRate)
         {
-            float f1 = Clamp(Freq1, MinFreq, sampleRate * 0.4f);
-            float f2 = Clamp(Freq2, f1 * 1.5f, sampleRate * 0.4f);
-            float f3 = Clamp(Freq3, f2 * 1.5f, sampleRate * 0.45f);
-            if (sampleRate != st.AppliedSr ||
-                Math.Abs(f1 - st.AppliedF1) > 0.01f ||
-                Math.Abs(f2 - st.AppliedF2) > 0.01f ||
-                Math.Abs(f3 - st.AppliedF3) > 0.01f)
+            bool dirty = sampleRate != st.AppliedSr;
+            float prev = MinFreq;
+            Span<float> f = stackalloc float[Splits];
+            for (int k = 0; k < Splits; k++)
             {
-                st.Lp1.SetLowpass(sampleRate, f1);
-                st.Hp1.SetHighpass(sampleRate, f1);
-                st.Lp2.SetLowpass(sampleRate, f2);
-                st.Hp2.SetHighpass(sampleRate, f2);
-                st.Lp3.SetLowpass(sampleRate, f3);
-                st.Hp3.SetHighpass(sampleRate, f3);
-                st.AppliedF1 = f1; st.AppliedF2 = f2; st.AppliedF3 = f3; st.AppliedSr = sampleRate;
+                float lo = prev * 1.5f;
+                float hi = sampleRate * (k == Splits - 1 ? 0.45f : 0.4f);
+                f[k] = Clamp(Freqs[k], lo, hi);
+                if (Math.Abs(f[k] - st.AppliedFreq[k]) > 0.01f) dirty = true;
+                prev = f[k];
             }
+            if (!dirty) return;
+
+            for (int k = 0; k < Splits; k++)
+            {
+                st.Lp[k].SetLowpass(sampleRate, f[k]);
+                st.Hp[k].SetHighpass(sampleRate, f[k]);
+                st.AppliedFreq[k] = f[k];
+            }
+            st.AppliedSr = sampleRate;
         }
 
         private static float Clamp(float v, float lo, float hi) => v < lo ? lo : (v > hi ? hi : v);

@@ -278,6 +278,8 @@ namespace VirtualStereo.Desktop
 
         // ───────────────────────── 音箱设置面板（分频指向性） ─────────────────────────
 
+        private static float _genLW = 0f, _genLP = 1f, _genHW = 0.9f, _genHP = 2f;
+
         private static void DrawSpeakersPanel(DesktopApp app)
         {
             var d = app.Directivity;
@@ -285,47 +287,57 @@ namespace VirtualStereo.Desktop
             bool en = d.Enabled;
             if (ImGui.Checkbox("启用指向性（分频模拟）", ref en)) d.Enabled = en;
             ImGui.TextDisabled("信号链: 前置增益 -> 分频指向性 -> 空间模拟 -> 后置增益");
-            ImGui.TextDisabled("指向性属声源属性（真实喇叭低频绕射、高频聚拢），三种空间模式共用");
 
+            // 6 带 / 5 分频点
             ImGui.Spacing();
-            ImGui.Text("分频点（4 带: 低 / 中低 / 中高 / 高）");
-            float f;
-            f = d.Freq1;
-            ImGui.SetNextItemWidth(260);
-            if (ImGui.SliderFloat("低 | 中低", ref f, 60f, 1500f, "%.0f Hz")) d.Freq1 = f;
-            f = d.Freq2;
-            ImGui.SetNextItemWidth(260);
-            if (ImGui.SliderFloat("中低 | 中高", ref f, 200f, 6000f, "%.0f Hz")) d.Freq2 = f;
-            f = d.Freq3;
-            ImGui.SetNextItemWidth(260);
-            if (ImGui.SliderFloat("中高 | 高", ref f, 800f, 8000f, "%.0f Hz")) d.Freq3 = f;
+            ImGui.Text($"分频点（{DirectivityProcessor.Bands} 带，{DirectivityProcessor.Splits} 个分频点，最高 {DirectivityProcessor.MaxFreq:F0} Hz）");
+            for (int k = 0; k < DirectivityProcessor.Splits; k++)
+            {
+                float f = d.Freqs[k];
+                ImGui.SetNextItemWidth(260);
+                if (ImGui.SliderFloat($"分频{k + 1}##sp{k}", ref f, DirectivityProcessor.MinFreq, DirectivityProcessor.MaxFreq, "%.0f Hz"))
+                    d.Freqs[k] = f;
+            }
 
+            // 分带图案（带名 = 当前分频点算出的频段）
             ImGui.Spacing();
             ImGui.Text("分带图案  权重: 0=全向 0.5=心形 1=8字    锐度: 越大越窄");
-            BandRow("低频", d, 0);
-            BandRow("中低", d, 1);
-            BandRow("中高", d, 2);
-            BandRow("高频", d, 3);
+            for (int i = 0; i < DirectivityProcessor.Bands; i++)
+                BandRow(BandLabel(d, i), d.W, d.P, i);
+
+            // 渐变生成器：定两端、一键均匀插值（"更均匀"的省事做法）
+            ImGui.Spacing();
+            ImGui.Text("渐变生成器（定两端，一键插值 6 带）");
+            ImGui.SetNextItemWidth(140);
+            ImGui.SliderFloat("低频端 权重", ref _genLW, 0f, 1f, "%.2f");
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(140);
+            ImGui.SliderFloat("低频端 锐度", ref _genLP, 0.3f, 4f, "%.1f");
+            ImGui.SetNextItemWidth(140);
+            ImGui.SliderFloat("高频端 权重", ref _genHW, 0f, 1f, "%.2f");
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(140);
+            ImGui.SliderFloat("高频端 锐度", ref _genHP, 0.3f, 4f, "%.1f");
+            if (ImGui.Button("按端点渐变填充"))
+                d.FillGradient(_genLW, _genLP, _genHW, _genHP);
 
             ImGui.Spacing();
             if (ImGui.Button("预设 全向"))
             {
-                d.WLow = d.WMidLow = d.WMidHigh = d.WHigh = 0f;
-                d.PLow = d.PMidLow = d.PMidHigh = d.PHigh = 1f;
+                for (int i = 0; i < DirectivityProcessor.Bands; i++) { d.W[i] = 0f; d.P[i] = 1f; }
             }
             ImGui.SameLine();
             if (ImGui.Button("预设 均匀心形"))
             {
-                d.WLow = d.WMidLow = d.WMidHigh = d.WHigh = 0.5f;
-                d.PLow = d.PMidLow = d.PMidHigh = d.PHigh = 1f;
+                for (int i = 0; i < DirectivityProcessor.Bands; i++) { d.W[i] = 0.5f; d.P[i] = 1f; }
             }
             ImGui.SameLine();
             if (ImGui.Button("预设 高频聚拢"))
             {
-                d.WLow = 0f; d.WMidLow = 0.1f; d.WMidHigh = 0.5f; d.WHigh = 0.9f;
-                d.PLow = 1f; d.PMidLow = 1f; d.PMidHigh = 1.5f; d.PHigh = 2f;
+                d.FillGradient(0f, 1f, 0.9f, 2f);
             }
 
+            // 朝向
             ImGui.Spacing();
             ImGui.Text("朝向（决定离轴角）");
             int aim = d.Aim;
@@ -344,48 +356,43 @@ namespace VirtualStereo.Desktop
             }
             ImGui.TextDisabled("朝向听者=平直响应；固定朝前=声源偏离正前方即可听出高频变暗");
 
+            // 实时分带增益
             ImGui.Spacing();
-            d.GainsAt(app.AzL, app.ElL, out float gl0, out float gl1, out float gl2, out float gl3);
-            d.GainsAt(app.AzR, app.ElR, out float gr0, out float gr1, out float gr2, out float gr3);
-            ImGui.Text($"当前分带增益  L: {gl0:F2} {gl1:F2} {gl2:F2} {gl3:F2}");
-            ImGui.Text($"              R: {gr0:F2} {gr1:F2} {gr2:F2} {gr3:F2}");
-            ImGui.TextDisabled("（依次为 低/中低/中高/高）");
+            d.GainsAt(app.AzL, app.ElL, _gL);
+            d.GainsAt(app.AzR, app.ElR, _gR);
+            ImGui.Text("当前分带增益  L: " + GainsText(_gL));
+            ImGui.Text("              R: " + GainsText(_gR));
         }
 
-        private static void BandRow(string name, DirectivityProcessor d, int band)
-        {
-            float w = 0f, p = 1f;
-            switch (band)
-            {
-                case 0: w = d.WLow; p = d.PLow; break;
-                case 1: w = d.WMidLow; p = d.PMidLow; break;
-                case 2: w = d.WMidHigh; p = d.PMidHigh; break;
-                default: w = d.WHigh; p = d.PHigh; break;
-            }
+        private static readonly float[] _gL = new float[DirectivityProcessor.Bands];
+        private static readonly float[] _gR = new float[DirectivityProcessor.Bands];
 
-            ImGui.SetNextItemWidth(150);
-            if (ImGui.SliderFloat(name + " 权重##w" + band, ref w, 0f, 1f, "%.2f"))
+        private static string GainsText(float[] g)
+        {
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < g.Length; i++)
             {
-                switch (band)
-                {
-                    case 0: d.WLow = w; break;
-                    case 1: d.WMidLow = w; break;
-                    case 2: d.WMidHigh = w; break;
-                    default: d.WHigh = w; break;
-                }
+                if (i > 0) sb.Append(' ');
+                sb.Append(g[i].ToString("F2", CultureInfo.InvariantCulture));
             }
+            return sb.ToString();
+        }
+
+        private static string BandLabel(DirectivityProcessor d, int i)
+        {
+            if (i == 0) return "<" + d.Freqs[0].ToString("F0") + "Hz";
+            if (i == DirectivityProcessor.Bands - 1)
+                return ">" + d.Freqs[DirectivityProcessor.Splits - 1].ToString("F0") + "Hz";
+            return d.Freqs[i - 1].ToString("F0") + "-" + d.Freqs[i].ToString("F0") + "Hz";
+        }
+
+        private static void BandRow(string label, float[] w, float[] p, int band)
+        {
+            ImGui.SetNextItemWidth(150);
+            ImGui.SliderFloat(label + " 权重##w" + band, ref w[band], 0f, 1f, "%.2f");
             ImGui.SameLine();
             ImGui.SetNextItemWidth(150);
-            if (ImGui.SliderFloat(name + " 锐度##p" + band, ref p, 0.3f, 4f, "%.1f"))
-            {
-                switch (band)
-                {
-                    case 0: d.PLow = p; break;
-                    case 1: d.PMidLow = p; break;
-                    case 2: d.PMidHigh = p; break;
-                    default: d.PHigh = p; break;
-                }
-            }
+            ImGui.SliderFloat(label + " 锐度##p" + band, ref p[band], 0.3f, 4f, "%.1f");
         }
 
         // ───────────────────────── 共用 ─────────────────────────
