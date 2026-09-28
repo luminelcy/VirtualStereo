@@ -1,6 +1,6 @@
 // 桌面应用状态与音频处理循环：
 //   捕获环 → 前置增益 → [校准扫频注入] → 指向性/距离 → 直通/双耳/ITD+ILD
-//   → 两耳 tap → 校准 EQ → 后处理 PEQ → 后置增益 → WASAPI 播放
+//   → [听音室：一次反射+混响] → 两耳 tap → 校准 EQ → 后处理 PEQ → 后置增益 → 播放
 // UI 线程只改字段；音频线程每块读取（字段竞争为良性，参数变更对齐到块边界）。
 using System;
 using VirtualStereo.Capture;
@@ -41,6 +41,9 @@ namespace VirtualStereo.Desktop
 
         // 后处理 PEQ：校准之后、播放之前的输出调音（见 PostEq.cs）
         public readonly PostEq Post = new PostEq();
+
+        // 听音室：一次反射 + 混响尾（见 Room.cs / RoomReverb.cs）
+        public readonly RoomRenderer Room = new RoomRenderer();
 
         public int CaptureRate => _capture != null && _capture.SampleRate > 0 ? _capture.SampleRate : 48000;
         public int OutputRate => _outputRate;
@@ -233,6 +236,10 @@ namespace VirtualStereo.Desktop
                         CurrentMode == (int)Mode.FullHrtf ? SaiMode.FullHrtf : SaiMode.ItdIld);
                 }
             }
+
+            // 听音室：一次反射 + 混响尾，加到两耳信号（耳朵=直达+房间）
+            if (Room.Enabled)
+                Room.Process(_monoL, _monoR, _stereo, Chunk, rate, AzL, ElL, DistL, AzR, ElR, DistR);
 
             // 人头两耳 tap：空间模拟之后、校准 EQ 与后置增益之前
             // （裸双耳信号：监视/录制/校准测量都取这里）

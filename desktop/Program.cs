@@ -91,6 +91,19 @@ if (settings.PostGain != null && settings.PostGain.Length == PostEq.Bands)
 if (settings.PostQ != null && settings.PostQ.Length == PostEq.Bands)
     for (int i = 0; i < PostEq.Bands; i++) app.Post.Q[i] = settings.PostQ[i];
 app.Post.SetEnabled(settings.PostEnabled);
+// 听音室
+app.Room.Model.W = settings.RoomW;
+app.Room.Model.D = settings.RoomD;
+app.Room.Model.H = settings.RoomH;
+app.Room.Model.ListenerX = settings.RoomListenerX;
+app.Room.Model.ListenerY = settings.RoomListenerY;
+app.Room.Model.ListenerZ = settings.RoomListenerZ;
+app.Room.Model.YawDeg = settings.RoomYaw;
+app.Room.Model.Absorb = settings.RoomAbsorb;
+app.Room.ReflDb = settings.RoomReflDb;
+app.Room.ReverbDb = settings.RoomReverbDb;
+app.Room.Damp = settings.RoomDamp;
+app.Room.Enabled = settings.RoomEnabled;
 Ui.Init(settings);
 
 void SaveSettings()
@@ -134,6 +147,18 @@ void SaveSettings()
     settings.PostFreq = (float[])app.Post.Freq.Clone();
     settings.PostGain = (float[])app.Post.GainDb.Clone();
     settings.PostQ = (float[])app.Post.Q.Clone();
+    settings.RoomEnabled = app.Room.Enabled;
+    settings.RoomW = app.Room.Model.W;
+    settings.RoomD = app.Room.Model.D;
+    settings.RoomH = app.Room.Model.H;
+    settings.RoomListenerX = app.Room.Model.ListenerX;
+    settings.RoomListenerY = app.Room.Model.ListenerY;
+    settings.RoomListenerZ = app.Room.Model.ListenerZ;
+    settings.RoomYaw = app.Room.Model.YawDeg;
+    settings.RoomAbsorb = app.Room.Model.Absorb;
+    settings.RoomReflDb = app.Room.ReflDb;
+    settings.RoomReverbDb = app.Room.ReverbDb;
+    settings.RoomDamp = app.Room.Damp;
     settings.WindowX = window.X;
     settings.WindowY = window.Y;
     settings.WindowW = window.Width;

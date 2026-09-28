@@ -33,6 +33,7 @@ namespace VirtualStereo.Desktop
             new PanelDef { Id = Page.Analysis, Title = "两耳分析", Subtitle = "波形 · 频谱", Draw = DrawAnalysisPanel },
             new PanelDef { Id = Page.Calibration, Title = "校准", Subtitle = "扫频 · 频响拉平", Draw = DrawCalibrationPanel },
             new PanelDef { Id = Page.PostProcess, Title = "后处理", Subtitle = "输出 PEQ · 曲线", Draw = DrawPostPanel },
+            new PanelDef { Id = Page.Room, Title = "听音室", Subtitle = "房间 · 反射 · 混响", Draw = DrawRoomPanel },
         };
 
         private struct Row
@@ -1063,6 +1064,187 @@ namespace VirtualStereo.Desktop
                 prevP = pp;
                 prevT = pt;
             }
+        }
+
+        // ───────────────────────── 听音室面板 ─────────────────────────
+
+        private static void DrawRoomPanel(DesktopApp app)
+        {
+            var room = app.Room;
+            var m = room.Model;
+
+            ImGui.Text("听音室（房间几何 -> 一阶镜像反射 + 混响尾）");
+            ImGui.TextDisabled("音箱仍按「空间模拟」的方位/距离绕听者摆位，这里定义它们处在多大的房间里");
+
+            bool en = room.Enabled;
+            if (ImGui.Checkbox("房间效果", ref en)) room.Enabled = en;
+            ImGui.SameLine();
+            if (ImGui.Button("小房间")) { m.W = 3.5f; m.D = 4f; m.H = 2.5f; m.Absorb = 0.25f; m.ListenerX = 1.75f; m.ListenerY = 1.2f; m.ListenerZ = 2f; }
+            ImGui.SameLine();
+            if (ImGui.Button("听音室")) { m.W = 5.5f; m.D = 7f; m.H = 2.8f; m.Absorb = 0.2f; m.ListenerX = 2.75f; m.ListenerY = 1.2f; m.ListenerZ = 3.5f; }
+            ImGui.SameLine();
+            if (ImGui.Button("大厅")) { m.W = 12f; m.D = 18f; m.H = 6f; m.Absorb = 0.1f; m.ListenerX = 6f; m.ListenerY = 1.2f; m.ListenerZ = 9f; }
+
+            ImGui.Spacing();
+            ImGui.Text("房间尺寸（米）");
+            ParamSlider("宽##rw", m.W, 2f, 20f, "%.2f m", v => m.W = v);
+            ImGui.SameLine();
+            ParamSlider("深##rd", m.D, 2f, 25f, "%.2f m", v => m.D = v);
+            ImGui.SameLine();
+            ParamSlider("高##rh", m.H, 2f, 8f, "%.2f m", v => m.H = v);
+
+            ImGui.Text("听者位置（房间坐标）");
+            ParamSlider("X##rx", m.ListenerX, 0f, m.W, "%.2f m", v => m.ListenerX = v);
+            ImGui.SameLine();
+            ParamSlider("Z##rz", m.ListenerZ, 0f, m.D, "%.2f m", v => m.ListenerZ = v);
+            ImGui.SameLine();
+            ParamSlider("离地高##ry", m.ListenerY, 0.5f, 2.2f, "%.2f m", v => m.ListenerY = v);
+            ImGui.SameLine();
+            ParamSlider("朝向##ryaw", m.YawDeg, -180f, 180f, "%.0f 度", v => m.YawDeg = v);
+
+            ImGui.Text("墙面吸声与混响");
+            ParamSlider("吸声α##ra", m.Absorb, 0.02f, 0.95f, "%.2f", v => m.Absorb = v);
+            ImGui.SameLine();
+            ImGui.Text($"RT60 ≈ {m.Rt60():F2} s");
+            ImGui.SameLine();
+            if (ImGui.Button("瓷砖")) m.Absorb = 0.02f;
+            ImGui.SameLine();
+            if (ImGui.Button("木材")) m.Absorb = 0.1f;
+            ImGui.SameLine();
+            if (ImGui.Button("地毯")) m.Absorb = 0.35f;
+            ImGui.SameLine();
+            if (ImGui.Button("软包")) m.Absorb = 0.7f;
+
+            ParamSlider("早期反射##rrefl", room.ReflDb, -24f, 0f, "%.1f dB", v => room.ReflDb = v);
+            ImGui.SameLine();
+            ParamSlider("混响电平##rrev", room.ReverbDb, -40f, 0f, "%.1f dB", v => room.ReverbDb = v);
+            ImGui.SameLine();
+            ParamSlider("明暗##rdamp", room.Damp, 0f, 1f, "%.2f", v => room.Damp = v);
+
+            ImGui.Spacing();
+            ImGui.Text("房间俯视（上=前墙 +Z；蓝L/红R=音箱；细线=一次反射路径）");
+            DrawRoomDiagram(app);
+            ImGui.TextDisabled("注意：校准测量包含房间——改房间参数后建议重新校准，或关掉校准做 A/B");
+        }
+
+        /// <summary>参数滑条（无文本框版）。</summary>
+        private static void ParamSlider(string label, float v, float min, float max,
+            string fmt, Action<float> set)
+        {
+            float t = v;
+            ImGui.SetNextItemWidth(170);
+            if (ImGui.SliderFloat(label, ref t, min, max, fmt)) set(t);
+        }
+
+        private static void DrawRoomDiagram(DesktopApp app)
+        {
+            var m = app.Room.Model;
+            float boxW = Math.Min(560f, Math.Max(360f, ImGui.GetContentRegionAvail().X));
+            const float boxH = 320f;
+            Vector2 origin = ImGui.GetCursorScreenPos();
+            ImGui.Dummy(new Vector2(boxW, boxH));
+            var dl = ImGui.GetWindowDrawList();
+            dl.AddRectFilled(origin, origin + new Vector2(boxW, boxH), Col(24, 24, 30));
+            dl.AddRect(origin, origin + new Vector2(boxW, boxH), Col(60, 60, 70));
+
+            float w = Math.Max(1f, m.W), d = Math.Max(1f, m.D);
+            const float pad = 34f;
+            float scale = Math.Min((boxW - 2 * pad) / w, (boxH - 2 * pad) / d);
+            float ox = origin.X + (boxW - w * scale) / 2f;
+            float oy = origin.Y + (boxH - d * scale) / 2f;
+
+            // 房间矩形（z=D 前墙在上，z=0 后墙在下）
+            dl.AddRect(new Vector2(ox, oy), new Vector2(ox + w * scale, oy + d * scale), Col(90, 95, 110), 1.5f);
+            dl.AddText(new Vector2(ox + 4, oy + 2), Col(95, 100, 115), "前墙 z=" + d.ToString("F1", CultureInfo.InvariantCulture));
+            dl.AddText(new Vector2(ox + 4, oy + d * scale - 18), Col(95, 100, 115), "后墙 z=0");
+
+            Vector2 ToPx(float x, float z) => new Vector2(ox + x * scale, oy + (d - z) * scale);
+
+            // 音箱位置（由空间模拟的方位/距离换算）
+            m.SpeakerPos(app.AzL, app.ElL, app.DistL, out float slx, out float sly, out float slz);
+            m.SpeakerPos(app.AzR, app.ElR, app.DistR, out float srx, out float sry, out float srz);
+            var pL = ToPx(slx, slz);
+            var pR = ToPx(srx, srz);
+
+            // 一次反射射线（镜像法：声源->墙点->听者）
+            DrawReflectionRays(dl, m, slx, sly, slz, ToPx);
+            DrawReflectionRays(dl, m, srx, sry, srz, ToPx);
+
+            dl.AddCircleFilled(pL, 5f, Col(80, 150, 255));
+            dl.AddCircleFilled(pR, 5f, Col(255, 95, 90));
+            dl.AddText(pL + new Vector2(7, -6), Col(80, 150, 255), "L");
+            dl.AddText(pR + new Vector2(7, -6), Col(255, 95, 90), "R");
+
+            // 听者 + 朝向
+            var lp = ToPx(m.ListenerX, m.ListenerZ);
+            float psi = m.YawDeg * (float)Math.PI / 180f;
+            var fwd = new Vector2((float)Math.Sin(psi), -(float)Math.Cos(psi));
+            dl.AddLine(lp, lp + fwd * 24f, Col(220, 220, 230), 2f);
+            dl.AddCircleFilled(lp, 6f, Col(220, 220, 230));
+            dl.AddText(lp + new Vector2(9, 2), Col(220, 220, 230), "听者");
+        }
+
+        private static void DrawReflectionRays(ImDrawListPtr dl, RoomModel m,
+            float sx, float sy, float sz, Func<float, float, Vector2> toPx)
+        {
+            for (int wall = 0; wall < RoomModel.Walls; wall++)
+            {
+                if (!BouncePoint(m, wall, sx, sy, sz, out float bx, out float by, out float bz))
+                    continue;
+                var pb = toPx(bx, bz);
+                dl.AddLine(toPx(sx, sz), pb, Col(70, 80, 100), 1f);
+                dl.AddLine(pb, toPx(m.ListenerX, m.ListenerZ), Col(70, 80, 100), 1f);
+            }
+        }
+
+        /// <summary>镜像法求一次反射的墙上落点（落在墙矩形内才算）。</summary>
+        private static bool BouncePoint(RoomModel m, int wall,
+            float sx, float sy, float sz, out float bx, out float by, out float bz)
+        {
+            bx = by = bz = 0f;
+            float lx = m.ListenerX, ly = m.ListenerY, lz = m.ListenerZ;
+            float w = Math.Max(1f, m.W), h = Math.Max(1f, m.H), d = Math.Max(1f, m.D);
+
+            float ix = sx, iy = sy, iz = sz;
+            float cx = 0f, cy = 0f, cz = 0f;
+            bool xWall = false, yWall = false;
+            switch (wall)
+            {
+                case 0: ix = -sx; xWall = true; break;
+                case 1: ix = 2 * w - sx; cx = w; xWall = true; break;
+                case 2: iy = -sy; yWall = true; break;
+                case 3: iy = 2 * h - sy; cy = h; yWall = true; break;
+                case 4: iz = -sz; break;
+                case 5: iz = 2 * d - sz; cz = d; break;
+            }
+
+            float t;
+            if (xWall)
+            {
+                float den = lx - ix;
+                if (Math.Abs(den) < 1e-5f) return false;
+                t = (cx - ix) / den;
+            }
+            else if (yWall)
+            {
+                float den = ly - iy;
+                if (Math.Abs(den) < 1e-5f) return false;
+                t = (cy - iy) / den;
+            }
+            else
+            {
+                float den = lz - iz;
+                if (Math.Abs(den) < 1e-5f) return false;
+                t = (cz - iz) / den;
+            }
+            if (t < 0f || t > 1f) return false;
+
+            bx = ix + (lx - ix) * t;
+            by = iy + (ly - iy) * t;
+            bz = iz + (lz - iz) * t;
+            return bx > -0.01f && bx < w + 0.01f
+                && by > -0.01f && by < h + 0.01f
+                && bz > -0.01f && bz < d + 0.01f;
         }
 
         // ───────────────────────── 共用 ─────────────────────────

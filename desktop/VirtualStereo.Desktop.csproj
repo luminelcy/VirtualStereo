@@ -45,6 +45,8 @@
 		<Compile Include="..\core\Phonon\PhononNative.cs" Link="core\Phonon\PhononNative.cs" />
 		<Compile Include="..\core\Phonon\BinauralEngine.cs" Link="core\Phonon\BinauralEngine.cs" />
 		<Compile Include="..\core\Dsp\Directivity.cs" Link="core\Dsp\Directivity.cs" />
+		<Compile Include="..\core\Dsp\Room.cs" Link="core\Dsp\Room.cs" />
+		<Compile Include="..\core\Dsp\RoomReverb.cs" Link="core\Dsp\RoomReverb.cs" />
 	</ItemGroup>
 
 	<ItemGroup>

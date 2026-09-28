@@ -61,6 +61,20 @@ namespace VirtualStereo.Desktop
         public float[] PostGain { get; set; } = null;
         public float[] PostQ { get; set; } = null;
 
+        // 听音室（房间几何 + 一次反射 + 混响）
+        public bool RoomEnabled { get; set; } = false;
+        public float RoomW { get; set; } = 6f;
+        public float RoomD { get; set; } = 7f;
+        public float RoomH { get; set; } = 2.8f;
+        public float RoomListenerX { get; set; } = 3f;
+        public float RoomListenerY { get; set; } = 1.2f;
+        public float RoomListenerZ { get; set; } = 3.5f;
+        public float RoomYaw { get; set; } = 0f;
+        public float RoomAbsorb { get; set; } = 0.15f;
+        public float RoomReflDb { get; set; } = -6f;
+        public float RoomReverbDb { get; set; } = -12f;
+        public float RoomDamp { get; set; } = 0.4f;
+
         // 界面
         public int LastPage { get; set; } = 0;
 
