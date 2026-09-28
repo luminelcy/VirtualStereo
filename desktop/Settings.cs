@@ -41,6 +41,18 @@ namespace VirtualStereo.Desktop
         // 音源
         public string LastProcessName { get; set; } = "";
 
+        // 校准（扫频测两耳频响 + 反相 EQ；曲线留存则参数可继续调，不必重扫）
+        public bool CalEnabled { get; set; } = false;
+        public float CalSmoothOct { get; set; } = 0.333f;
+        public float CalMaxBoostDb { get; set; } = 6f;
+        public float CalF1 { get; set; } = 10f;
+        public float CalF2 { get; set; } = 24000f;
+        public int CalRate { get; set; } = 48000;
+        public long CalTimeTicks { get; set; } = 0;
+        public float[] CalGridHz { get; set; } = null;
+        public float[] CalMeasL { get; set; } = null;
+        public float[] CalMeasR { get; set; } = null;
+
         // 界面
         public int LastPage { get; set; } = 0;
 

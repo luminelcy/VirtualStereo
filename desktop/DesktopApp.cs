@@ -1,5 +1,6 @@
 // 桌面应用状态与音频处理循环：
-//   捕获环 → 前置增益 → 直通/双耳/ITD+ILD → WASAPI 播放
+//   捕获环 → 前置增益 → [校准扫频注入] → 指向性/距离 → 直通/双耳/ITD+ILD
+//   → 两耳 tap → 校准 EQ → 后置增益 → WASAPI 播放
 // UI 线程只改字段；音频线程每块读取（字段竞争为良性，参数变更对齐到块边界）。
 using System;
 using VirtualStereo.Capture;
@@ -31,8 +32,13 @@ namespace VirtualStereo.Desktop
         private readonly DirectivityState _dirStateL = new DirectivityState();
         private readonly DirectivityState _dirStateR = new DirectivityState();
 
-        // 人头两耳监视/录制（tap 点：空间模拟之后、后置增益之前）
+        // 人头两耳监视/录制（tap 点：空间模拟之后、校准 EQ 与后置增益之前——
+        // 始终是裸双耳信号；校准 EQ 只作用于最后的耳机回放）
         public readonly EarMonitor Monitor = new EarMonitor();
+
+        // 校准：扫频测量两耳频响 → 输出侧反相 EQ 拉平（见 Calibration.cs）
+        public readonly Calibration Cal = new Calibration();
+
         public int CaptureRate => _capture != null && _capture.SampleRate > 0 ? _capture.SampleRate : 48000;
 
         // ── 状态读数（音频线程写 / UI 读）──
@@ -48,6 +54,7 @@ namespace VirtualStereo.Desktop
         private ProcessLoopbackCapture _capture;
         private WasapiPlayer _player;
         private readonly object _dspLock = new object();
+        private int _outputRate = 48000; // 播放侧采样率（无捕获时校准也走它）
 
         private const int Chunk = 256;
         private readonly float[] _monoL = new float[Chunk];
@@ -63,19 +70,20 @@ namespace VirtualStereo.Desktop
             try
             {
                 _capture = ProcessLoopbackCapture.Start(pid, includeTree: true);
+                _outputRate = _capture.SampleRate > 0 ? _capture.SampleRate : 48000;
                 if (!BinauralEngine.Initialized)
                 {
-                    if (!BinauralEngine.Init(_capture.SampleRate, Chunk))
+                    if (!BinauralEngine.Init(_outputRate, Chunk))
                     {
                         StopCapture();
                         return "双耳引擎初始化失败（phonon.dll 在程序目录吗？）";
                     }
                     BinauralEngine.SetInterpolation(Interpolation);
                 }
-                _player = new WasapiPlayer(_capture.SampleRate, FillInterleaved);
+                _player = new WasapiPlayer(_outputRate, FillInterleaved);
                 _stagePos = Chunk;
                 _nextSilenceAt = 0;
-                return $"捕获中: pid={pid}  {_capture.SampleRate}Hz  播放缓冲 {_player.BufferFrames} 帧";
+                return $"捕获中: pid={pid}  {_outputRate}Hz  播放缓冲 {_player.BufferFrames} 帧";
             }
             catch (Exception e)
             {
@@ -86,12 +94,47 @@ namespace VirtualStereo.Desktop
 
         public void StopCapture()
         {
+            Cal.Cancel(); // 输出链路拆了，扫频无处可走
             Monitor.StopRecording();
             try { _player?.Dispose(); } catch { }
             try { _capture?.Dispose(); } catch { } // 恢复被压过的会话音量
             _player = null;
             _capture = null;
         }
+
+        /// <summary>只把输出链路拉起来（校准用：扫频走的就是这条链，无需音源）。</summary>
+        public string EnsureOutput()
+        {
+            if (_player != null) return null;
+            try
+            {
+                const int rate = 48000;
+                if (!BinauralEngine.Initialized)
+                {
+                    if (!BinauralEngine.Init(rate, Chunk))
+                        return "双耳引擎初始化失败（phonon.dll 在程序目录吗？）";
+                    BinauralEngine.SetInterpolation(Interpolation);
+                }
+                _outputRate = rate;
+                _player = new WasapiPlayer(rate, FillInterleaved);
+                _stagePos = Chunk;
+                return null;
+            }
+            catch (Exception e)
+            {
+                return "输出启动失败: " + e.Message;
+            }
+        }
+
+        /// <summary>开始校准扫频。返回 null=成功 / 错误信息。</summary>
+        public string StartCalibration()
+        {
+            string err = EnsureOutput();
+            if (err != null) return err;
+            return Cal.Start(_outputRate);
+        }
+
+        public void CancelCalibration() => Cal.Cancel();
 
         public void ApplyInterpolation()
         {
@@ -124,28 +167,34 @@ namespace VirtualStereo.Desktop
         private void FillStage()
         {
             var cap = _capture;
-            if (cap == null)
-            {
-                Array.Clear(_stereo, 0, _stereo.Length);
-                _stagePos = 0;
-                return;
-            }
+            int rate = cap != null && cap.SampleRate > 0 ? cap.SampleRate : _outputRate;
 
-            int rate = cap.SampleRate > 0 ? cap.SampleRate : 48000;
-            bool buffered = cap.RingL.Available >= rate / 8 && cap.RingR.Available >= rate / 8;
-            if (buffered)
+            if (cap != null)
             {
-                cap.RingL.Read(_monoL, Chunk);
-                cap.RingR.Read(_monoR, Chunk);
+                bool buffered = cap.RingL.Available >= rate / 8 && cap.RingR.Available >= rate / 8;
+                if (buffered)
+                {
+                    cap.RingL.Read(_monoL, Chunk);
+                    cap.RingR.Read(_monoR, Chunk);
+                }
+                else
+                {
+                    Array.Clear(_monoL, 0, Chunk);
+                    Array.Clear(_monoR, 0, Chunk);
+                }
             }
             else
             {
+                // 无捕获（纯校准）：链路照跑，输入静音
                 Array.Clear(_monoL, 0, Chunk);
                 Array.Clear(_monoR, 0, Chunk);
             }
 
             float g = (float)Math.Pow(10.0, PreGainDb / 20.0);
             for (int i = 0; i < Chunk; i++) { _monoL[i] *= g; _monoR[i] *= g; }
+
+            // 校准扫频：替换两路音箱信号（扫频期间听不到源内容）
+            Cal.Generate(_monoL, _monoR, Chunk, rate);
 
             // 音箱指向性（分频）：前置增益之后、空间模拟之前（朝向每源独立）
             if (Directivity.Enabled)
@@ -181,8 +230,13 @@ namespace VirtualStereo.Desktop
                 }
             }
 
-            // 人头两耳 tap：空间模拟之后、后置增益之前（虚拟人头各耳实际收到的信号）
+            // 人头两耳 tap：空间模拟之后、校准 EQ 与后置增益之前
+            // （裸双耳信号：监视/录制/校准测量都取这里）
             Monitor.Push(_stereo, Chunk, rate);
+            Cal.OnEars(_stereo, Chunk);
+
+            // 校准 EQ：输出侧把两耳频响拉平（校准模式开时生效）
+            Cal.Process(_stereo, Chunk);
 
             // 后置增益：模拟之后、出声之前（输出电平）
             float pg = (float)Math.Pow(10.0, PostGainDb / 20.0);

@@ -31,6 +31,7 @@ namespace VirtualStereo.Desktop
             new PanelDef { Id = Page.Spatial, Title = "空间模拟", Subtitle = "模式 · 方位 · HRTF", Draw = DrawSpatialPanel },
             new PanelDef { Id = Page.Speakers, Title = "音箱设置", Subtitle = "分频指向性 · 图案", Draw = DrawSpeakersPanel },
             new PanelDef { Id = Page.Analysis, Title = "两耳分析", Subtitle = "波形 · 频谱", Draw = DrawAnalysisPanel },
+            new PanelDef { Id = Page.Calibration, Title = "校准", Subtitle = "扫频 · 频响拉平", Draw = DrawCalibrationPanel },
         };
 
         private struct Row
@@ -82,6 +83,8 @@ namespace VirtualStereo.Desktop
             DrawContent(app);
 
             ImGui.End();
+
+            PumpCalibration(app); // 状态推进挂主循环：切面板不打断扫频/分析
         }
 
         private static void DrawSidebar()
@@ -218,7 +221,7 @@ namespace VirtualStereo.Desktop
 
             // 人头两耳：虚拟人头各耳实际收到的信号
             ImGui.Spacing();
-            ImGui.Text("人头两耳（空间化之后、后置增益之前）");
+            ImGui.Text("人头两耳（空间化之后、校准 EQ 与后置增益之前）");
             var mon = app.Monitor;
             ImGui.PushStyleColor(ImGuiCol.PlotHistogram, new Vector4(0.31f, 0.59f, 1f, 1f));
             ImGui.ProgressBar(Math.Min(mon.PeakL, 1.5f) / 1.5f, new Vector2(320, 16), "");
@@ -791,6 +794,153 @@ namespace VirtualStereo.Desktop
             {
                 float m = (float)Math.Sqrt(_fftRe[k] * _fftRe[k] + _fftIm[k] * _fftIm[k]) * norm;
                 dst[k] = 20f * (float)Math.Log10(Math.Max(1e-7f, m));
+            }
+        }
+
+        // ───────────────────────── 校准面板 ─────────────────────────
+
+        /// <summary>校准状态推进（每帧，与面板无关）：Done→后台分析；Ready→按参数重设计。</summary>
+        private static void PumpCalibration(DesktopApp app)
+        {
+            var cal = app.Cal;
+            int st = cal.State;
+            if (st == Calibration.Done)
+            {
+                cal.State = Calibration.Analyzing;
+                System.Threading.Tasks.Task.Run(() => cal.Analyze());
+            }
+            else if (cal.HasCurve && cal.DesignDirty && !cal.IsBusy)
+            {
+                // 刚分析完 / 参数改动 / 设置恢复的曲线：按当前参数设计 EQ
+                cal.Redesign();
+                cal.DesignDirty = false;
+            }
+        }
+
+        private static void DrawCalibrationPanel(DesktopApp app)
+        {
+            var cal = app.Cal;
+
+            ImGui.Text("双音箱扫频测量两耳频响 -> 反相 EQ 拉平（耳机回放前）");
+            ImGui.TextDisabled("测量点 = 模拟人头两耳（空间化之后）；EQ 只作用于输出侧，两耳分析/录制始终是裸信号");
+            ImGui.TextDisabled("改动摆位/朝向/距离/指向性/HRTF 后请重新校准");
+
+            // 控制行
+            if (cal.IsBusy)
+            {
+                if (ImGui.Button("取消校准")) app.CancelCalibration();
+                ImGui.SameLine();
+                ImGui.ProgressBar(cal.Progress, new Vector2(240, 18), "");
+                ImGui.SameLine();
+                ImGui.Text(cal.State == Calibration.Analyzing
+                    ? "分析中..."
+                    : (cal.State == Calibration.SweepL ? "左音箱" : "右音箱")
+                        + $" 扫频 {cal.Progress * 100:F0}%  {cal.CurFreq:F0}Hz");
+            }
+            else
+            {
+                if (ImGui.Button("开始校准"))
+                {
+                    string e = app.StartCalibration();
+                    _status = e ?? $"校准中 {cal.MeasF1:F0}..{cal.MeasF2:F0}Hz — 扫频会从耳机出声，注意音量";
+                }
+                ImGui.SameLine();
+                ImGui.Text(cal.HasCurve && cal.DoneAtTicks > 0
+                    ? "上次校准: " + new DateTime(cal.DoneAtTicks).ToString("yyyy-MM-dd HH:mm:ss")
+                    : (cal.HasCurve ? "已有测量曲线" : "未校准过"));
+            }
+            if (cal.Message.Length > 0)
+                ImGui.TextColored(new Vector4(1f, 0.55f, 0.35f, 1f), cal.Message);
+
+            // 校准模式：可开可关
+            ImGui.Spacing();
+            bool en = cal.Enabled;
+            if (ImGui.Checkbox("校准模式（应用校准 EQ）", ref en)) cal.SetEnabled(en);
+
+            // 参数：改动即时重设计（不用重扫）
+            float sm = cal.SmoothOct;
+            ImGui.SetNextItemWidth(180);
+            if (ImGui.SliderFloat("平滑##cal", ref sm, 0.083f, 1f, "%.3f 倍频程"))
+            {
+                cal.SmoothOct = sm;
+                cal.DesignDirty = true;
+            }
+            ImGui.SameLine();
+            float mb = cal.MaxBoostDb;
+            ImGui.SetNextItemWidth(180);
+            if (ImGui.SliderFloat("提升上限##cal", ref mb, 0f, 12f, "%.1f dB"))
+            {
+                cal.MaxBoostDb = mb;
+                cal.DesignDirty = true;
+            }
+            ImGui.SameLine();
+            ImGui.TextDisabled("改动即时重算，不用重扫");
+
+            if (!cal.HasCurve)
+            {
+                ImGui.Spacing();
+                ImGui.TextDisabled("点「开始校准」后自动完成：左音箱扫频 -> 右音箱扫频 -> 分析出两耳频响");
+                return;
+            }
+
+            ImGui.Spacing();
+            ImGui.Text("两耳频响（纵 -36..+18 dB，横对数；实测=平滑后中带归一 / EQ=绿 / 校准后预期=白）");
+            ImGui.TextDisabled("EQ 曲线是实测的镜像（限幅后）；预期曲线越贴 0dB 线 = 拉得越平");
+            DrawCalBox(cal.GridHz, cal.DispL, cal.CorrL, cal.PredL, Col(80, 150, 255), "L耳");
+            DrawCalBox(cal.GridHz, cal.DispR, cal.CorrR, cal.PredR, Col(255, 95, 90), "R耳");
+        }
+
+        private static void DrawCalBox(float[] freqs, float[] disp, float[] corr, float[] pred,
+            uint col, string label)
+        {
+            float w = Math.Min(900f, Math.Max(360f, ImGui.GetContentRegionAvail().X));
+            const float h = 170f;
+            Vector2 origin = ImGui.GetCursorScreenPos();
+            ImGui.Dummy(new Vector2(w, h));
+            var dl = ImGui.GetWindowDrawList();
+            dl.AddRectFilled(origin, origin + new Vector2(w, h), Col(24, 24, 30));
+            dl.AddRect(origin, origin + new Vector2(w, h), Col(60, 60, 70));
+
+            float fLo = freqs[0], fHi = freqs[freqs.Length - 1];
+            float lo = (float)Math.Log10(fLo), hi = (float)Math.Log10(fHi);
+            const float dbLo = -36f, dbHi = 18f;
+
+            foreach (int f in new[] { 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000 })
+            {
+                if (f < fLo || f > fHi) continue;
+                float x = origin.X + w * ((float)Math.Log10(f) - lo) / (hi - lo);
+                dl.AddLine(new Vector2(x, origin.Y), new Vector2(x, origin.Y + h), Col(45, 48, 58));
+                string lbl = f >= 1000 ? (f / 1000) + "k" : f.ToString(CultureInfo.InvariantCulture);
+                dl.AddText(new Vector2(x + 3, origin.Y + h - 16), Col(95, 100, 115), lbl);
+            }
+            foreach (int db in new[] { 12, 0, -12, -24, -36 })
+            {
+                float y = origin.Y + h * (dbHi - db) / (dbHi - dbLo);
+                dl.AddLine(new Vector2(origin.X, y), new Vector2(origin.X + w, y),
+                    db == 0 ? Col(70, 75, 90) : Col(45, 48, 58));
+                dl.AddText(new Vector2(origin.X + 4, y + 2), Col(95, 100, 115),
+                    db.ToString(CultureInfo.InvariantCulture));
+            }
+
+            DrawCalTrace(dl, origin, w, h, freqs, disp, col, lo, hi, dbLo, dbHi, 1.6f);
+            DrawCalTrace(dl, origin, w, h, freqs, corr, Col(120, 220, 120), lo, hi, dbLo, dbHi, 1.2f);
+            DrawCalTrace(dl, origin, w, h, freqs, pred, Col(225, 225, 230), lo, hi, dbLo, dbHi, 1.2f);
+            dl.AddText(new Vector2(origin.X + w - 34, origin.Y + 4), col, label);
+        }
+
+        private static void DrawCalTrace(ImDrawListPtr dl, Vector2 origin, float w, float h,
+            float[] freqs, float[] db, uint col, float lo, float hi,
+            float dbLo, float dbHi, float thickness)
+        {
+            Vector2 prev = default;
+            for (int i = 0; i < freqs.Length; i++)
+            {
+                float x = origin.X + w * ((float)Math.Log10(freqs[i]) - lo) / (hi - lo);
+                float v = Math.Clamp(db[i], dbLo, dbHi);
+                float y = origin.Y + h * (dbHi - v) / (dbHi - dbLo);
+                var p = new Vector2(x, y);
+                if (i > 0) dl.AddLine(prev, p, col, thickness);
+                prev = p;
             }
         }
 

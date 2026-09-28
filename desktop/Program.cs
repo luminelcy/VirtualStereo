@@ -72,6 +72,13 @@ if (settings.DirAim.HasValue)
     if (settings.DirAimAz.HasValue) { app.AimAzL = app.AimAzR = settings.DirAimAz.Value; }
     if (settings.DirAimEl.HasValue) { app.AimElL = app.AimElR = settings.DirAimEl.Value; }
 }
+// 校准：曲线恢复（参数可继续调）+ 模式开关
+app.Cal.SmoothOct = settings.CalSmoothOct;
+app.Cal.MaxBoostDb = settings.CalMaxBoostDb;
+if (settings.CalRate > 0) app.Cal.MeasRate = settings.CalRate;
+app.Cal.LoadMeasured(settings.CalGridHz, settings.CalMeasL, settings.CalMeasR,
+    settings.CalF1, settings.CalF2, settings.CalTimeTicks);
+app.Cal.SetEnabled(settings.CalEnabled);
 Ui.Init(settings);
 
 void SaveSettings()
@@ -99,6 +106,16 @@ void SaveSettings()
     settings.AimElL = app.AimElL;
     settings.AimAzR = app.AimAzR;
     settings.AimElR = app.AimElR;
+    settings.CalEnabled = app.Cal.Enabled;
+    settings.CalSmoothOct = app.Cal.SmoothOct;
+    settings.CalMaxBoostDb = app.Cal.MaxBoostDb;
+    settings.CalF1 = app.Cal.MeasF1;
+    settings.CalF2 = app.Cal.MeasF2;
+    settings.CalRate = (int)app.Cal.MeasRate;
+    settings.CalTimeTicks = app.Cal.DoneAtTicks;
+    settings.CalGridHz = app.Cal.HasCurve ? (float[])app.Cal.GridHz.Clone() : null;
+    settings.CalMeasL = app.Cal.HasCurve ? (float[])app.Cal.MeasL.Clone() : null;
+    settings.CalMeasR = app.Cal.HasCurve ? (float[])app.Cal.MeasR.Clone() : null;
     settings.WindowX = window.X;
     settings.WindowY = window.Y;
     settings.WindowW = window.Width;

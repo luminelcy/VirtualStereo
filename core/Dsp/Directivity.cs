@@ -208,6 +208,67 @@ namespace VirtualStereo.Dsp
             Set(b0, b1, b2, a0, a1, a2);
         }
 
+        /// <summary>峰化 EQ（RBJ peaking，中心 freq / 带宽 Q / 增益 dB）——校准拉平用。</summary>
+        public void SetPeaking(float sr, float freq, float q, float gainDb)
+        {
+            double a = Math.Pow(10.0, gainDb / 40.0);
+            double w0 = 2 * Math.PI * freq / sr;
+            double cosw = Math.Cos(w0), sinw = Math.Sin(w0);
+            double alpha = sinw / (2 * q);
+            double b0 = 1 + alpha * a, b1 = -2 * cosw, b2 = 1 - alpha * a;
+            double a0 = 1 + alpha / a, a1 = -2 * cosw, a2 = 1 - alpha / a;
+            Set(b0, b1, b2, a0, a1, a2);
+        }
+
+        /// <summary>清零状态（切换校准开关时用，防残留瞬态）。</summary>
+        public void Reset() { _z1 = 0f; _z2 = 0f; }
+
+        /// <summary>幅度响应（dB）——校准面板画"EQ 合成曲线"用。
+        /// 零极点分解式：多项式形式在高 Q 极点附近浮点相消，会算出 ±100dB 假尖峰。</summary>
+        public float MagDb(float freq, float sr)
+        {
+            double w = 2 * Math.PI * freq / sr;
+            double cw = Math.Cos(w), sw = Math.Sin(w);
+
+            // H(z) = b0·(z−z1)(z−z2) / (z−p1)(z−p2)；|e^jw − c|² = (cw−cr)² + (sw−ci)²
+            RootPair(1.0, _a1, _a2, out double p1r, out double p1i, out double p2r, out double p2i);
+            double den = Dist2(cw, sw, p1r, p1i) * Dist2(cw, sw, p2r, p2i);
+            if (den < 1e-300) den = 1e-300;
+
+            double b0 = _b0;
+            double num = b0 * b0;
+            if (Math.Abs(b0) > 1e-30)
+            {
+                RootPair(b0, _b1, _b2, out double z1r, out double z1i, out double z2r, out double z2i);
+                num *= Dist2(cw, sw, z1r, z1i) * Dist2(cw, sw, z2r, z2i);
+            }
+            return (float)(10.0 * Math.Log10(Math.Max(1e-300, num / den)));
+        }
+
+        private static double Dist2(double cw, double sw, double cr, double ci)
+            => (cw - cr) * (cw - cr) + (sw - ci) * (sw - ci);
+
+        /// <summary>a·x² + b·x + c = 0 的两根（可为复根）。</summary>
+        private static void RootPair(double a, double b, double c,
+            out double r1, out double i1, out double r2, out double i2)
+        {
+            double disc = b * b - 4 * a * c;
+            double inv = 0.5 / a;
+            double br = -b * inv;
+            if (disc >= 0)
+            {
+                double sq = Math.Sqrt(disc) * inv;
+                r1 = br + sq; i1 = 0;
+                r2 = br - sq; i2 = 0;
+            }
+            else
+            {
+                double sq = Math.Sqrt(-disc) * Math.Abs(inv);
+                r1 = br; i1 = sq;
+                r2 = br; i2 = -sq;
+            }
+        }
+
         private void Set(double b0, double b1, double b2, double a0, double a1, double a2)
         {
             _b0 = (float)(b0 / a0);

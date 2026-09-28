@@ -18,6 +18,7 @@
 	<ItemGroup>
 		<Compile Include="Program.cs" />
 		<Compile Include="DesktopApp.cs" />
+		<Compile Include="Calibration.cs" />
 		<Compile Include="EarMonitor.cs" />
 		<Compile Include="Fft.cs" />
 		<Compile Include="Settings.cs" />
