@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net6.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>disable</Nullable>
+		<RootNamespace>VirtualStereo.Desktop</RootNamespace>
+		<LangVersion>latest</LangVersion>
+		<IsPackable>false</IsPackable>
+		<AssemblyName>VirtualStereo.Desktop</AssemblyName>
+		<Platforms>AnyCPU;x64</Platforms>
+	</PropertyGroup>
+
+	<PropertyGroup>
+		<EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<Compile Include="Program.cs" />
+		<Compile Include="DesktopApp.cs" />
+		<Compile Include="Ui.cs" />
+		<Compile Include="WasapiPlayer.cs" />
+		<Compile Include="WinEnum.cs" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Veldrid" Version="4.9.0" />
+		<PackageReference Include="Veldrid.ImGui" Version="5.89.2-ga121087cad" />
+		<PackageReference Include="Veldrid.StartupUtilities" Version="4.9.0" />
+	</ItemGroup>
+
+	<!-- core：共享源码链接（与 mod 同一套 DSP，桌面先行验证） -->
+	<ItemGroup>
+		<Compile Include="..\core\VsLog.cs" Link="core\VsLog.cs" />
+		<Compile Include="..\core\AudioCapture\NativeAudio.cs" Link="core\AudioCapture\NativeAudio.cs" />
+		<Compile Include="..\core\AudioCapture\AudioSessions.cs" Link="core\AudioCapture\AudioSessions.cs" />
+		<Compile Include="..\core\AudioCapture\SampleRing.cs" Link="core\AudioCapture\SampleRing.cs" />
+		<Compile Include="..\core\AudioCapture\ProcessLoopbackCapture.cs" Link="core\AudioCapture\ProcessLoopbackCapture.cs" />
+		<Compile Include="..\core\Phonon\PhononNative.cs" Link="core\Phonon\PhononNative.cs" />
+		<Compile Include="..\core\Phonon\BinauralEngine.cs" Link="core\Phonon\BinauralEngine.cs" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Include="..\phonon\phonon.dll" Link="phonon.dll" CopyToOutputDirectory="PreserveNewest" />
+	</ItemGroup>
+</Project>

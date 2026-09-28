@@ -1,0 +1,7 @@
+bin/
+obj/
+*.user
+.vs/
+资料整理.md
+docs/
+phonon/

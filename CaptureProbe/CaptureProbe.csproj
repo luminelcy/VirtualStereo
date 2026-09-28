@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net6.0</TargetFramework>
+		<ImplicitUsings>disable</ImplicitUsings>
+		<Nullable>disable</Nullable>
+		<RootNamespace>CaptureProbe</RootNamespace>
+		<LangVersion>latest</LangVersion>
+		<IsPackable>false</IsPackable>
+		<AssemblyName>CaptureProbe</AssemblyName>
+		<Platforms>AnyCPU;x64</Platforms>
+	</PropertyGroup>
+
+	<PropertyGroup>
+		<EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<Compile Include="Program.cs" />
+		<Compile Include="TonePlayer.cs" />
+		<!-- 与 mod 共享的纯 C# 捕获层（源码链接，同编译进本程序） -->
+		<Compile Include="..\core\AudioCapture\NativeAudio.cs" Link="AudioCapture\NativeAudio.cs" />
+		<Compile Include="..\core\AudioCapture\SampleRing.cs" Link="AudioCapture\SampleRing.cs" />
+		<Compile Include="..\core\AudioCapture\ProcessLoopbackCapture.cs" Link="AudioCapture\ProcessLoopbackCapture.cs" />
+	</ItemGroup>
+</Project>
