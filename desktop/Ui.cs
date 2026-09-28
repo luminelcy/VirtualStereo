@@ -215,6 +215,58 @@ namespace VirtualStereo.Desktop
             ImGui.Spacing();
             if (ImGui.Checkbox("静音原声（消双响）", ref _silenceTmp))
                 app.SilenceOriginal = _silenceTmp;
+
+            // 人头两耳：虚拟人头各耳实际收到的信号
+            ImGui.Spacing();
+            ImGui.Text("人头两耳（空间化之后、后置增益之前）");
+            var mon = app.Monitor;
+            ImGui.PushStyleColor(ImGuiCol.PlotHistogram, new Vector4(0.31f, 0.59f, 1f, 1f));
+            ImGui.ProgressBar(Math.Min(mon.PeakL, 1.5f) / 1.5f, new Vector2(-1, 16),
+                $"L耳   RMS {mon.RmsL:F4}   峰 {mon.PeakL:F3}");
+            ImGui.PopStyleColor();
+            ImGui.PushStyleColor(ImGuiCol.PlotHistogram, new Vector4(1f, 0.37f, 0.35f, 1f));
+            ImGui.ProgressBar(Math.Min(mon.PeakR, 1.5f) / 1.5f, new Vector2(-1, 16),
+                $"R耳   RMS {mon.RmsR:F4}   峰 {mon.PeakR:F3}");
+            ImGui.PopStyleColor();
+            float diff = EarDiffDb(mon.RmsL, mon.RmsR);
+            ImGui.Text("耳间声级差 (L-R): " + diff.ToString("+0.0;-0.0;0.0", CultureInfo.InvariantCulture) + " dB");
+
+            ImGui.Spacing();
+            ImGui.Text("录制（32bit float WAV -> recordings/）");
+            int rm = mon.Mode;
+            if (ImGui.RadioButton("左耳##rec", ref rm, 0)) mon.Mode = rm;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("右耳##rec", ref rm, 1)) mon.Mode = rm;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("双声道##rec", ref rm, 2)) mon.Mode = rm;
+            ImGui.SameLine();
+            if (!mon.Recording)
+            {
+                if (ImGui.Button("开始录制"))
+                {
+                    if (!app.Capturing)
+                    {
+                        _status = "先在主面板开始捕获";
+                    }
+                    else
+                    {
+                        string path = mon.StartRecording(
+                            (EarMonitor.RecMode)rm, app.CaptureRate,
+                            System.IO.Path.Combine(AppContext.BaseDirectory, "recordings"));
+                        _status = path != null ? "录制中: " + path : "录制启动失败: " + mon.LastError;
+                    }
+                }
+            }
+            else
+            {
+                if (ImGui.Button("停止录制"))
+                {
+                    mon.StopRecording();
+                    _status = "录制已保存到 recordings/";
+                }
+                ImGui.SameLine();
+                ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), $"录制中 {mon.RecSeconds:F1}s");
+            }
         }
 
         /// <summary>增益行：滑条 + 文本框（Ctrl+点滑条也能输）。</summary>
@@ -552,6 +604,13 @@ namespace VirtualStereo.Desktop
 
         private static readonly float[] _gL = new float[DirectivityProcessor.Bands];
         private static readonly float[] _gR = new float[DirectivityProcessor.Bands];
+
+        private static float EarDiffDb(float l, float r)
+        {
+            const float eps = 1e-6f;
+            if (l < eps || r < eps) return 0f;
+            return (float)(20.0 * Math.Log10(l / r));
+        }
 
         private static bool AllNearOne(float[] g)
         {

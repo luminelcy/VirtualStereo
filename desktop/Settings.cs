@@ -12,6 +12,7 @@ namespace VirtualStereo.Desktop
         public float PreGainDb { get; set; } = -6f;
         public float PostGainDb { get; set; } = 0f;
         public bool SilenceOriginal { get; set; } = true;
+        public int RecMode { get; set; } = 2; // 录制声道: 0=左耳 1=右耳 2=双声道
 
         // 空间模拟
         public int Mode { get; set; } = 1;

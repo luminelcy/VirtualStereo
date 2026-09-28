@@ -31,6 +31,10 @@ namespace VirtualStereo.Desktop
         private readonly DirectivityState _dirStateL = new DirectivityState();
         private readonly DirectivityState _dirStateR = new DirectivityState();
 
+        // 人头两耳监视/录制（tap 点：空间模拟之后、后置增益之前）
+        public readonly EarMonitor Monitor = new EarMonitor();
+        public int CaptureRate => _capture != null && _capture.SampleRate > 0 ? _capture.SampleRate : 48000;
+
         // ── 状态读数（音频线程写 / UI 读）──
         public volatile float OutPeak;
         public volatile float OutRms;
@@ -54,6 +58,7 @@ namespace VirtualStereo.Desktop
 
         public string StartCapture(int pid)
         {
+            Monitor.StopRecording(); // 捕获切换会打断录制，先收尾保存
             StopCapture();
             try
             {
@@ -81,6 +86,7 @@ namespace VirtualStereo.Desktop
 
         public void StopCapture()
         {
+            Monitor.StopRecording();
             try { _player?.Dispose(); } catch { }
             try { _capture?.Dispose(); } catch { } // 恢复被压过的会话音量
             _player = null;
@@ -174,6 +180,9 @@ namespace VirtualStereo.Desktop
                         CurrentMode == (int)Mode.FullHrtf ? SaiMode.FullHrtf : SaiMode.ItdIld);
                 }
             }
+
+            // 人头两耳 tap：空间模拟之后、后置增益之前（虚拟人头各耳实际收到的信号）
+            Monitor.Push(_stereo, Chunk, rate);
 
             // 后置增益：模拟之后、出声之前（输出电平）
             float pg = (float)Math.Pow(10.0, PostGainDb / 20.0);

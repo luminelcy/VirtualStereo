@@ -43,6 +43,7 @@ using var app = new DesktopApp();
 app.PreGainDb = settings.PreGainDb;
 app.PostGainDb = settings.PostGainDb;
 app.SilenceOriginal = settings.SilenceOriginal;
+app.Monitor.Mode = settings.RecMode;
 app.CurrentMode = settings.Mode;
 app.AzL = settings.AzL;
 app.AzR = settings.AzR;
@@ -78,6 +79,7 @@ void SaveSettings()
     settings.PreGainDb = app.PreGainDb;
     settings.PostGainDb = app.PostGainDb;
     settings.SilenceOriginal = app.SilenceOriginal;
+    settings.RecMode = app.Monitor.Mode;
     settings.Mode = app.CurrentMode;
     settings.AzL = app.AzL;
     settings.AzR = app.AzR;
