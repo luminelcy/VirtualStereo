@@ -1,10 +1,12 @@
-// 混响尾：8 线 Hadamard FDN（feedback delay network）。
+// 混响尾：8 线 Hadamard FDN（feedback delay network），**按频带差异化衰减**。
 //   - 互质延迟线（48k 基准 ~32-39ms，按采样率缩放）→ 密而无规的模态分布
-//   - 反馈矩阵 = 归一化 8 点 Hadamard（正交 → 能量守恒 → 衰减只由每线增益决定）
-//   - 每线反馈增益 g_k = 10^(−3·d_k/RT60)（振幅每 RT60 衰 60dB）
-//   - 反馈回路里一阶低通做高频衰减（"明暗"滑条）——真实房间 HF 衰得更快
+//   - 反馈矩阵 = 归一化 8 点 Hadamard（正交 → 能量守恒 → 衰减只由增益决定）
+//   - 每线反馈：三频带分割（250Hz/2k，与反射同一分界）→ 每带增益
+//     g_{k,b} = 10^(−3·d_k/RT60_b)——RT60 三带来自 Sabine 按表面面积加权，
+//     于是"地毯的房间"尾巴高频先死、低频拖着，和真实房间一个样
+//   - 再过一阶低通做"明暗"用户微调（材料之外的手动倾斜）
 //   - 输出取两组正交符号组合 → 左右去相关
-// 无状态参数推拽：RT60/明暗 的目标值每块一阶平滑，稳定不爆。
+// 增益直接设目标值：只影响尾巴衰减速度，跳变不产生咔哒，且对"一次喂一大块"也正确。
 using System;
 
 namespace VirtualStereo.Dsp
@@ -12,6 +14,8 @@ namespace VirtualStereo.Dsp
     internal sealed class RoomReverb
     {
         private const int Lines = 8;
+        private const float CrossLow = 250f;
+        private const float CrossMid = 2000f;
         private static readonly int[] BaseLen =
             { 1543, 1601, 1657, 1693, 1741, 1783, 1811, 1873 }; // 48k 基准
 
@@ -20,22 +24,27 @@ namespace VirtualStereo.Dsp
         private readonly int[] _pos = new int[Lines];
         private readonly float[] _read = new float[Lines];
         private readonly float[] _mix = new float[Lines];
-        private readonly float[] _lp = new float[Lines];
-        private readonly float[] _g = new float[Lines];
+        private readonly float[] _lp = new float[Lines];      // 明暗低通状态
+        private readonly float[] _g0 = new float[Lines];      // 每线低频带增益
+        private readonly float[] _g1 = new float[Lines];
+        private readonly float[] _g2 = new float[Lines];
+        private readonly LrCrossover[][] _xr;                 // LR4 频带分割（每线两级）
         private int _rate;
 
         public RoomReverb()
         {
+            for (int k = 0; k < Lines; k++) _buf[k] = new float[8192];
+            _xr = new LrCrossover[Lines][];
             for (int k = 0; k < Lines; k++)
             {
-                _buf[k] = new float[8192];
-                _g[k] = 0.5f;
+                _xr[k] = new[] { new LrCrossover(), new LrCrossover() };
+                _g0[k] = _g1[k] = _g2[k] = 0.5f;
             }
         }
 
-        /// <summary>处理一块（单声道馈入 → 去相关双声道写出）。</summary>
+        /// <summary>处理一块（单声道馈入 → 去相关双声道写出）。RT60 三带单位秒。</summary>
         public void Process(float[] monoL, float[] monoR, float[] outL, float[] outR,
-            int frames, int rate, float rt60, float damp)
+            int frames, int rate, float rtLow, float rtMid, float rtHigh, float damp)
         {
             if (rate != _rate)
             {
@@ -45,16 +54,15 @@ namespace VirtualStereo.Dsp
                     int n = (int)(BaseLen[k] * (rate / 48000.0));
                     _len[k] = Math.Clamp(n, 64, 8191);
                     _pos[k] = 0;
+                    _xr[k][0].Set(rate, CrossLow);
+                    _xr[k][1].Set(rate, CrossMid);
                 }
             }
 
-            float rt = Math.Clamp(rt60, 0.05f, 8f);
-            for (int k = 0; k < Lines; k++)
-            {
-                // 反馈增益直接设目标值：它只影响尾巴衰减速度，跳变不产生咔哒；
-                // （按调用次数平滑会让"一次喂一大块"的场景永远升不到目标 RT60）
-                _g[k] = (float)Math.Pow(10.0, -3.0 * (_len[k] / (double)rate) / rt);
-            }
+            // 每线每带：RT60 → 反馈增益（振幅每 RT60 衰 60dB）
+            BandGain(rtLow, _g0);
+            BandGain(rtMid, _g1);
+            BandGain(rtHigh, _g2);
             float dampA = 1f - 0.9f * Math.Clamp(damp, 0f, 1f); // 1=亮 … 0.1=暗
 
             for (int i = 0; i < frames; i++)
@@ -72,7 +80,13 @@ namespace VirtualStereo.Dsp
 
                 for (int k = 0; k < Lines; k++)
                 {
-                    _lp[k] += (_mix[k] * _g[k] - _lp[k]) * dampA;
+                    // 三频带差异化衰减（LR4 重组）：高频吸得多 → 高频带增益小 → 尾巴变暗
+                    float lo = _xr[k][0].TickLow(_mix[k]);
+                    float rest = _xr[k][0].TickHigh(_mix[k]);
+                    float mi = _xr[k][1].TickLow(rest);
+                    float hi = _xr[k][1].TickHigh(rest);
+                    float fb = lo * _g0[k] + mi * _g1[k] + hi * _g2[k];
+                    _lp[k] += (fb - _lp[k]) * dampA;
                     _buf[k][_pos[k]] = x + _lp[k];
                     if (++_pos[k] >= _len[k]) _pos[k] = 0;
                 }
@@ -83,6 +97,13 @@ namespace VirtualStereo.Dsp
                 outR[i] = 0.5f * (_read[0] - _read[1] + _read[2] - _read[3]
                                 + _read[4] - _read[5] + _read[6] - _read[7]);
             }
+        }
+
+        private void BandGain(float rt60, float[] dst)
+        {
+            float rt = Math.Clamp(rt60, 0.05f, 8f);
+            for (int k = 0; k < Lines; k++)
+                dst[k] = (float)Math.Pow(10.0, -3.0 * (_len[k] / (double)_rate) / rt);
         }
 
         /// <summary>就地 8 点快速 Walsh-Hadamard 变换（未归一）。</summary>

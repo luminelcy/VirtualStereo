@@ -70,7 +70,9 @@ namespace VirtualStereo.Desktop
         public float RoomListenerY { get; set; } = 1.2f;
         public float RoomListenerZ { get; set; } = 3.5f;
         public float RoomYaw { get; set; } = 0f;
-        public float RoomAbsorb { get; set; } = 0.15f;
+        // 材质吸声 9 值：[表面(地板/天花板/四壁)×3][频带(低/中/高)]
+        public float[] RoomAbs { get; set; } = null;
+        public float? RoomAbsorb { get; set; } = null; // 旧版单值 α（迁移用；null=配置里没有）
         public float RoomReflDb { get; set; } = -6f;
         public float RoomReverbDb { get; set; } = -12f;
         public float RoomDamp { get; set; } = 0.4f;

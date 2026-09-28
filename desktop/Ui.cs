@@ -1079,11 +1079,11 @@ namespace VirtualStereo.Desktop
             bool en = room.Enabled;
             if (ImGui.Checkbox("房间效果", ref en)) room.Enabled = en;
             ImGui.SameLine();
-            if (ImGui.Button("小房间")) { m.W = 3.5f; m.D = 4f; m.H = 2.5f; m.Absorb = 0.25f; m.ListenerX = 1.75f; m.ListenerY = 1.2f; m.ListenerZ = 2f; }
+            if (ImGui.Button("小房间")) { m.W = 3.5f; m.D = 4f; m.H = 2.5f; m.ListenerX = 1.75f; m.ListenerY = 1.2f; m.ListenerZ = 2f; }
             ImGui.SameLine();
-            if (ImGui.Button("听音室")) { m.W = 5.5f; m.D = 7f; m.H = 2.8f; m.Absorb = 0.2f; m.ListenerX = 2.75f; m.ListenerY = 1.2f; m.ListenerZ = 3.5f; }
+            if (ImGui.Button("听音室")) { m.W = 5.5f; m.D = 7f; m.H = 2.8f; m.ListenerX = 2.75f; m.ListenerY = 1.2f; m.ListenerZ = 3.5f; }
             ImGui.SameLine();
-            if (ImGui.Button("大厅")) { m.W = 12f; m.D = 18f; m.H = 6f; m.Absorb = 0.1f; m.ListenerX = 6f; m.ListenerY = 1.2f; m.ListenerZ = 9f; }
+            if (ImGui.Button("大厅")) { m.W = 12f; m.D = 18f; m.H = 6f; m.ListenerX = 6f; m.ListenerY = 1.2f; m.ListenerZ = 9f; }
 
             ImGui.Spacing();
             ImGui.Text("房间尺寸（米）");
@@ -1102,19 +1102,19 @@ namespace VirtualStereo.Desktop
             ImGui.SameLine();
             ParamSlider("朝向##ryaw", m.YawDeg, -180f, 180f, "%.0f 度", v => m.YawDeg = v);
 
-            ImGui.Text("墙面吸声与混响");
-            ParamSlider("吸声α##ra", m.Absorb, 0.02f, 0.95f, "%.2f", v => m.Absorb = v);
-            ImGui.SameLine();
-            ImGui.Text($"RT60 ≈ {m.Rt60():F2} s");
-            ImGui.SameLine();
-            if (ImGui.Button("瓷砖")) m.Absorb = 0.02f;
-            ImGui.SameLine();
-            if (ImGui.Button("木材")) m.Absorb = 0.1f;
-            ImGui.SameLine();
-            if (ImGui.Button("地毯")) m.Absorb = 0.35f;
-            ImGui.SameLine();
-            if (ImGui.Button("软包")) m.Absorb = 0.7f;
+            // 材质：分表面 × 分频带吸声（低<250Hz 中250-2k 高>2k）
+            ImGui.Spacing();
+            ImGui.Text("材质（吸声 α，分频带：低<250Hz 中250-2k 高>2k；地板/天花板/四壁可不同）");
+            DrawMaterialRow("地板", 0, m, ref _matSel0);
+            DrawMaterialRow("天花板", 1, m, ref _matSel1);
+            DrawMaterialRow("四壁", 2, m, ref _matSel2);
 
+            float[] rt = _rtScratch;
+            m.Rt60Bands(rt);
+            ImGui.Text($"三带 RT60：低 {rt[0]:F2}s   中 {rt[1]:F2}s   高 {rt[2]:F2}s");
+            ImGui.TextDisabled("吸高频多的材料（地毯/吸音板）会让 RT60 高频段明显变短，尾巴更暗");
+
+            ImGui.Spacing();
             ParamSlider("早期反射##rrefl", room.ReflDb, -24f, 0f, "%.1f dB", v => room.ReflDb = v);
             ImGui.SameLine();
             ParamSlider("混响电平##rrev", room.ReverbDb, -40f, 0f, "%.1f dB", v => room.ReverbDb = v);
@@ -1125,6 +1125,50 @@ namespace VirtualStereo.Desktop
             ImGui.Text("房间俯视（上=前墙 +Z；蓝L/红R=音箱；细线=一次反射路径）");
             DrawRoomDiagram(app);
             ImGui.TextDisabled("注意：校准测量包含房间——改房间参数后建议重新校准，或关掉校准做 A/B");
+        }
+
+        // 材质预设（α 三频带，近似常见建材数据：低频平、高频上翘是软材料的共性）
+        private static readonly string[] MaterialNames =
+        {
+            "自定义", "抹灰/瓷砖", "混凝土", "木地板", "薄地毯", "厚地毯", "吸音板", "窗帘",
+        };
+        private static readonly float[][] MaterialAbs =
+        {
+            null,                              // 自定义：不动
+            new[] { 0.02f, 0.03f, 0.05f },     // 抹灰/瓷砖
+            new[] { 0.02f, 0.02f, 0.03f },     // 混凝土
+            new[] { 0.08f, 0.07f, 0.10f },     // 木地板
+            new[] { 0.05f, 0.20f, 0.50f },     // 薄地毯（吸高频远多于低频）
+            new[] { 0.15f, 0.45f, 0.80f },     // 厚地毯
+            new[] { 0.25f, 0.60f, 0.90f },     // 吸音板
+            new[] { 0.10f, 0.35f, 0.60f },     // 窗帘
+        };
+        private static readonly float[] _rtScratch = new float[3];
+        private static int _matSel0 = 4, _matSel1 = 1, _matSel2 = 3; // 启动默认对齐模型默认材质
+
+        private static void DrawMaterialRow(string label, int surface, RoomModel m, ref int sel)
+        {
+            ImGui.Text(label);
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(110);
+            if (ImGui.Combo("##mat" + surface, ref sel, MaterialNames, MaterialNames.Length))
+            {
+                var abs = MaterialAbs[sel];
+                if (abs != null) m.SetSurface(surface, abs[0], abs[1], abs[2]);
+            }
+            for (int b = 0; b < 3; b++)
+            {
+                ImGui.SameLine();
+                ImGui.Text(b == 0 ? "低" : b == 1 ? "中" : "高");
+                ImGui.SameLine();
+                float a = m.Abs[surface, b];
+                ImGui.SetNextItemWidth(78);
+                if (ImGui.SliderFloat($"##abs{surface}_{b}", ref a, 0f, 0.95f, "%.2f"))
+                {
+                    m.Abs[surface, b] = a;
+                    sel = 0; // 手动改过 → 显示为"自定义"
+                }
+            }
         }
 
         /// <summary>参数滑条（无文本框版）。</summary>

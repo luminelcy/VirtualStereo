@@ -9,8 +9,8 @@
 // 结构与教训：
 // - 滤波状态必须**每声源一份**（曾共用一套，左右声道互污染滤波器记忆，
 //   产生持续调制失真——"声音不正常"的真凶，不是缓冲区）
-// - 分频 = 级联互补分割（每级 LP+HP，幅度和恒平）；每声源 5 级 10 个双二阶，
-//   成本微不足道；将来要更多带时升级分割树/SVF 结构即可
+// - 分频 = 级联 LR4 分割（每级 LP/HP 各两个 BW2 级联）；曾用单对 BW LP+HP——
+//   功率互补但幅度不互补，分频点复数和为零，重组出深谷（后换 LR4 根治）
 // - 挂载：前置增益之后、空间模拟之前（声源属性，各空间模式共用）
 using System;
 
@@ -24,23 +24,20 @@ namespace VirtualStereo.Dsp
         Manual = 2,         // 手动角度
     }
 
-    /// <summary>每声源一份的滤波状态（5 级互补分割，10 个双二阶）。</summary>
+    /// <summary>每声源一份的滤波状态（5 级 LR4 分割，20 个双二阶）。</summary>
     internal sealed class DirectivityState
     {
-        internal readonly Biquad[] Lp;
-        internal readonly Biquad[] Hp;
+        internal readonly LrCrossover[] X;
         internal readonly float[] AppliedFreq;
         internal float AppliedSr = -1f;
 
         public DirectivityState()
         {
-            Lp = new Biquad[DirectivityProcessor.Splits];
-            Hp = new Biquad[DirectivityProcessor.Splits];
+            X = new LrCrossover[DirectivityProcessor.Splits];
             AppliedFreq = new float[DirectivityProcessor.Splits];
             for (int k = 0; k < DirectivityProcessor.Splits; k++)
             {
-                Lp[k] = new Biquad();
-                Hp[k] = new Biquad();
+                X[k] = new LrCrossover();
                 AppliedFreq[k] = -1f;
             }
         }
@@ -80,8 +77,8 @@ namespace VirtualStereo.Dsp
                 float sum = 0f;
                 for (int k = 0; k < Splits; k++)
                 {
-                    float hp = state.Hp[k].Tick(s);
-                    float lp = state.Lp[k].Tick(s);
+                    float lp = state.X[k].TickLow(s);
+                    float hp = state.X[k].TickHigh(s);
                     sum += lp * _g[k];
                     s = hp;
                 }
@@ -173,14 +170,37 @@ namespace VirtualStereo.Dsp
 
             for (int k = 0; k < Splits; k++)
             {
-                st.Lp[k].SetLowpass(sampleRate, f[k]);
-                st.Hp[k].SetHighpass(sampleRate, f[k]);
+                st.X[k].Set(sampleRate, f[k]);
                 st.AppliedFreq[k] = f[k];
             }
             st.AppliedSr = sampleRate;
         }
 
         private static float Clamp(float v, float lo, float hi) => v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    /// <summary>Linkwitz-Riley 4 阶分频器：两个同截止 2阶 BW 级联。
+    /// 为什么不用单纯 LP+HP：BW 功率互补但**不幅度互补**——复数和在分频点精确归零
+    /// （带间相位相反 180°，重组相消出深谷）。LR4 在分频点两路同相（都 −0.5），
+    /// 和为全通、幅度恒平，带增益不同时平滑过渡——这是重组的正确姿势。
+    /// 结构：low = LP2a→LP2b 级联；high = HP2a→HP2b 级联（各两阶）。</summary>
+    internal sealed class LrCrossover
+    {
+        private readonly Biquad _lpA = new Biquad();
+        private readonly Biquad _lpB = new Biquad();
+        private readonly Biquad _hpA = new Biquad();
+        private readonly Biquad _hpB = new Biquad();
+
+        public void Set(float sr, float freq)
+        {
+            _lpA.SetLowpass(sr, freq);
+            _lpB.SetLowpass(sr, freq);
+            _hpA.SetHighpass(sr, freq);
+            _hpB.SetHighpass(sr, freq);
+        }
+
+        public float TickLow(float s) => _lpB.Tick(_lpA.Tick(s));
+        public float TickHigh(float s) => _hpB.Tick(_hpA.Tick(s));
     }
 
     /// <summary>2阶 Butterworth 双二阶（RBJ cookbook），转置直接 II 型。</summary>

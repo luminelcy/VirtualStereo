@@ -99,7 +99,17 @@ app.Room.Model.ListenerX = settings.RoomListenerX;
 app.Room.Model.ListenerY = settings.RoomListenerY;
 app.Room.Model.ListenerZ = settings.RoomListenerZ;
 app.Room.Model.YawDeg = settings.RoomYaw;
-app.Room.Model.Absorb = settings.RoomAbsorb;
+// 材质：新配置用 9 值曲线；旧配置单值 α → 全带平铺；都没有 → 保留模型默认（地毯/抹灰/木地板）
+if (settings.RoomAbs != null && settings.RoomAbs.Length == 9)
+{
+    for (int s = 0; s < 3; s++)
+        app.Room.Model.SetSurface(s, settings.RoomAbs[s * 3], settings.RoomAbs[s * 3 + 1], settings.RoomAbs[s * 3 + 2]);
+}
+else if (settings.RoomAbsorb.HasValue)
+{
+    float a = settings.RoomAbsorb.Value;
+    for (int s = 0; s < 3; s++) app.Room.Model.SetSurface(s, a, a, a);
+}
 app.Room.ReflDb = settings.RoomReflDb;
 app.Room.ReverbDb = settings.RoomReverbDb;
 app.Room.Damp = settings.RoomDamp;
@@ -155,7 +165,12 @@ void SaveSettings()
     settings.RoomListenerY = app.Room.Model.ListenerY;
     settings.RoomListenerZ = app.Room.Model.ListenerZ;
     settings.RoomYaw = app.Room.Model.YawDeg;
-    settings.RoomAbsorb = app.Room.Model.Absorb;
+    settings.RoomAbs = new[]
+    {
+        app.Room.Model.Abs[0, 0], app.Room.Model.Abs[0, 1], app.Room.Model.Abs[0, 2],
+        app.Room.Model.Abs[1, 0], app.Room.Model.Abs[1, 1], app.Room.Model.Abs[1, 2],
+        app.Room.Model.Abs[2, 0], app.Room.Model.Abs[2, 1], app.Room.Model.Abs[2, 2],
+    };
     settings.RoomReflDb = app.Room.ReflDb;
     settings.RoomReverbDb = app.Room.ReverbDb;
     settings.RoomDamp = app.Room.Damp;

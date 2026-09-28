@@ -2,10 +2,12 @@
 //
 // 几何：轴对齐盒 [0,W]×[0,H]×[0,D]（y=0 为地面），听者 (x,y,z) + 朝向 yaw；
 //       音箱仍由"空间模拟"的 az/el/dist 绕听者摆位，换算到房间坐标（两套坐标不打架）。
+// 材质：分表面（地板/天花板/四壁）× 分频带（低<250Hz 中250-2k 高>2k）吸声系数 α——
+//       地毯吸高频远多于低频、天花板和地板不一种材料，都由这个 3×3 表达。
 // 反射：每音箱对 6 面墙各取一阶镜像源：
-//       延迟 = |听者−镜像|/c；增益 = (直达距离/路径长)·Γ，Γ=√(1−α)，α=墙面吸声；
-//       入射方向换到头坐标 → 每路 Woodworth ITD + 等功率 ILD（每耳独立分数延迟）。
-// 混响：Sabine 公式 α/体积/表面积 → RT60 → 8 线 Hadamard FDN（见 RoomReverb.cs）。
+//       延迟 = |听者−镜像|/c；增益 = 距离律 × Γ(频带)，Γ=√(1−α[表面][频带])
+//       —— 每条路径挂三频带滤波（按命中表面），入射方向做 Woodworth ITD + 等功率 ILD。
+// 混响：Sabine 按表面面积加权出 三带 RT60 → FDN 按频带差异化衰减（RoomReverb.cs）。
 // v1 有意简化：反射不带指向性着色、只一阶镜像、无空气吸收（更高阶密度由尾巴承担）。
 //
 // 挂载：指向性+距离之后的两路音箱信号进本模块，产出加到两耳信号上
@@ -31,24 +33,54 @@ namespace VirtualStereo.Dsp
         public const int Walls = 6;
         public const int Sources = 2;
         public const int MaxPaths = Sources * Walls;
+        public const int Surfaces = 3; // 0=地板 1=天花板 2=四壁
+        public const int Bands = 3;    // 0=低(<250Hz) 1=中(250-2k) 2=高(>2k)
 
         // 房间尺寸（米）
         public volatile float W = 6f, D = 7f, H = 2.8f;
         // 听者位置（米；y=离地耳朵高度）与朝向（yaw 度，0=朝 +Z 前墙）
         public volatile float ListenerX = 3f, ListenerY = 1.2f, ListenerZ = 3.5f;
         public volatile float YawDeg = 0f;
-        // 墙面吸声系数 α（0.02 瓷砖 .. 0.7 软包）
-        public volatile float Absorb = 0.15f;
 
-        /// <summary>RT60（秒，Sabine）：0.161V / (S·ᾱ)。</summary>
-        public float Rt60()
+        // 吸声系数 [表面][频带]（元素级并发读写为良性竞争）
+        public readonly float[,] Abs = new float[Surfaces, Bands];
+
+        public RoomModel()
+        {
+            // 默认：地板=薄地毯、天花板=抹灰、四壁=木地板（真实听音室常见组合）
+            SetSurface(0, 0.05f, 0.20f, 0.50f);
+            SetSurface(1, 0.02f, 0.03f, 0.05f);
+            SetSurface(2, 0.08f, 0.07f, 0.10f);
+        }
+
+        public void SetSurface(int surface, float low, float mid, float high)
+        {
+            Abs[surface, 0] = low;
+            Abs[surface, 1] = mid;
+            Abs[surface, 2] = high;
+        }
+
+        /// <summary>墙序号 → 表面（y=0 地板 / y=H 天花板 / 其余四壁）。</summary>
+        public static int SurfaceOfWall(int wall) => wall == 2 ? 0 : (wall == 3 ? 1 : 2);
+
+        /// <summary>三带 RT60（秒，Sabine 按表面面积加权）：0.161V / (S·ᾱ[带])。dst 长度=3。</summary>
+        public void Rt60Bands(float[] dst)
         {
             float w = Math.Max(1f, W), h = Math.Max(1f, H), d = Math.Max(1f, D);
             float v = w * h * d;
-            float s = 2f * (w * d + w * h + d * h);
-            float a = Math.Clamp(Absorb, 0.02f, 1f);
-            return Math.Clamp(0.161f * v / (s * a), 0.05f, 8f);
+            float sFloor = w * d, sCeil = w * d, sWall = 2f * (w + d) * h;
+            float sTot = sFloor + sCeil + sWall;
+            for (int b = 0; b < Bands; b++)
+            {
+                float aa = (sFloor * Clamp01(Abs[0, b])
+                          + sCeil * Clamp01(Abs[1, b])
+                          + sWall * Clamp01(Abs[2, b])) / sTot;
+                if (aa < 0.02f) aa = 0.02f;
+                dst[b] = Math.Clamp(0.161f * v / (sTot * aa), 0.05f, 8f);
+            }
         }
+
+        private static float Clamp01(float v) => v < 0f ? 0f : (v > 1f ? 1f : v);
 
         /// <summary>音箱在房间坐标的位置（由 az/el/dist 绕听者摆位换算）。</summary>
         public void SpeakerPos(float azDeg, float elDeg, float dist,
@@ -62,7 +94,8 @@ namespace VirtualStereo.Dsp
             z = ListenerZ + hz;
         }
 
-        /// <summary>重算 12 条一阶反射路径（2 音箱 × 6 墙）。</summary>
+        /// <summary>重算 12 条一阶反射路径（2 音箱 × 6 墙）。增益只含距离律——
+        /// 频率相关的 Γ（材料吸收）由渲染器按命中表面的频带滤波施加。</summary>
         public void ComputePaths(float azL, float elL, float distL,
             float azR, float elR, float distR, PathInfo[] dst)
         {
@@ -70,12 +103,11 @@ namespace VirtualStereo.Dsp
             float cw = (float)Math.Cos(psi), sw = (float)Math.Sin(psi);
             float lx = ListenerX, ly = ListenerY, lz = ListenerZ;
             float w = Math.Max(1f, W), h = Math.Max(1f, H), d = Math.Max(1f, D);
-            float gamma = (float)Math.Sqrt(Math.Max(0.001, 1.0 - Math.Clamp(Absorb, 0f, 0.999f)));
 
             ToRoom(azL, elL, distL, cw, sw, out float ax, out float ay, out float az);
             ToRoom(azR, elR, distR, cw, sw, out float bx, out float by, out float bz);
-            BuildFor(0, lx + ax, ly + ay, lz + az, distL, lx, ly, lz, w, h, d, gamma, cw, sw, dst);
-            BuildFor(1, lx + bx, ly + by, lz + bz, distR, lx, ly, lz, w, h, d, gamma, cw, sw, dst);
+            BuildFor(0, lx + ax, ly + ay, lz + az, distL, lx, ly, lz, w, h, d, cw, sw, dst);
+            BuildFor(1, lx + bx, ly + by, lz + bz, distR, lx, ly, lz, w, h, d, cw, sw, dst);
         }
 
         private static void ToRoom(float azDeg, float elDeg, float dist,
@@ -93,7 +125,7 @@ namespace VirtualStereo.Dsp
 
         private static void BuildFor(int src, float sx, float sy, float sz, float distDirect,
             float lx, float ly, float lz, float w, float h, float d,
-            float gamma, float cw, float sw, PathInfo[] dst)
+            float cw, float sw, PathInfo[] dst)
         {
             for (int wall = 0; wall < Walls; wall++)
             {
@@ -115,7 +147,7 @@ namespace VirtualStereo.Dsp
                 {
                     DelaySec = r / SpeedOfSound,
                     // 直达按 2m 参考反比；反射按同一律折算成相对直达的倍率
-                    Gain = gamma * Math.Min(4f, Math.Max(0.05f, distDirect) / r),
+                    Gain = Math.Min(4f, Math.Max(0.05f, distDirect) / r),
                 };
                 float ux = dx / r, uy = dy / r, uz = dz / r;
                 p.DirX = ux * cw - uz * sw;
@@ -123,6 +155,33 @@ namespace VirtualStereo.Dsp
                 p.DirZ = ux * sw + uz * cw;
                 dst[src * Walls + wall] = p;
             }
+        }
+    }
+
+    /// <summary>三频带吸声滤波（LR4 分割 → 每带 Γ=√(1−α) → 求和）。
+    /// 用 LR4 不用单对 BW：BW 功率互补但幅度不互补，分频点复数和归零、带间相消出深谷。
+    /// 状态每反射路径一份——共用会互相污染滤波器记忆（指向性踩过的坑）。</summary>
+    internal sealed class AbsBandFilter
+    {
+        private const float CrossLow = 250f;   // 低/中 分界
+        private const float CrossMid = 2000f;  // 中/高 分界
+        private readonly LrCrossover _x1 = new LrCrossover();
+        private readonly LrCrossover _x2 = new LrCrossover();
+        private float _rate = -1f;
+
+        public float Process(float s, float g0, float g1, float g2, float rate)
+        {
+            if (rate != _rate)
+            {
+                _x1.Set(rate, CrossLow);
+                _x2.Set(rate, CrossMid);
+                _rate = rate;
+            }
+            float low = _x1.TickLow(s);
+            float rest = _x1.TickHigh(s);
+            float mid = _x2.TickLow(rest);
+            float high = _x2.TickHigh(rest);
+            return low * g0 + mid * g1 + high * g2;
         }
     }
 
@@ -138,16 +197,26 @@ namespace VirtualStereo.Dsp
 
         private readonly PathInfo[] _paths = new PathInfo[RoomModel.MaxPaths];
         private readonly RoomDelay[] _delay;
+        private readonly AbsBandFilter[] _filt;         // 每路径一条（材料频带吸收）
+        private readonly int[] _surfOf = new int[RoomModel.MaxPaths]; // 命中表面
+        private readonly float[,] _gamma = new float[RoomModel.Surfaces, RoomModel.Bands];
         private readonly float[,] _gain = new float[RoomModel.MaxPaths, 2];
         private readonly float[,] _gainT = new float[RoomModel.MaxPaths, 2];
         private readonly float[,] _dlyT = new float[RoomModel.MaxPaths, 2];
         private readonly RoomReverb _reverb = new RoomReverb();
+        private readonly float[] _rt = new float[RoomModel.Bands];
         private float[] _revL, _revR;
 
         public RoomRenderer()
         {
             _delay = new RoomDelay[RoomModel.MaxPaths * 2];
+            _filt = new AbsBandFilter[RoomModel.MaxPaths];
             for (int i = 0; i < _delay.Length; i++) _delay[i] = new RoomDelay();
+            for (int p = 0; p < RoomModel.MaxPaths; p++)
+            {
+                _filt[p] = new AbsBandFilter();
+                _surfOf[p] = RoomModel.SurfaceOfWall(p % RoomModel.Walls);
+            }
         }
 
         /// <summary>音频线程：把房间贡献加到两耳交错立体声上（累加，不清零）。</summary>
@@ -157,6 +226,7 @@ namespace VirtualStereo.Dsp
         {
             Model.ComputePaths(azL, elL, distL, azR, elR, distR, _paths);
             RefreshTargets(rate);
+            RefreshGammas();
 
             float reflG = (float)Math.Pow(10.0, ReflDb / 20.0);
             for (int i = 0; i < frames; i++)
@@ -166,8 +236,12 @@ namespace VirtualStereo.Dsp
                 for (int p = 0; p < RoomModel.MaxPaths; p++)
                 {
                     float s = p < RoomModel.Walls ? sl : sr;
-                    accL += _gain[p, 0] * _delay[p * 2].Process(s, _dlyT[p, 0]);
-                    accR += _gain[p, 1] * _delay[p * 2 + 1].Process(s, _dlyT[p, 1]);
+                    int surf = _surfOf[p];
+                    // 按命中表面的材料吸收着色（低/中/高 Γ）
+                    float sf = _filt[p].Process(s,
+                        _gamma[surf, 0], _gamma[surf, 1], _gamma[surf, 2], rate);
+                    accL += _gain[p, 0] * _delay[p * 2].Process(sf, _dlyT[p, 0]);
+                    accR += _gain[p, 1] * _delay[p * 2 + 1].Process(sf, _dlyT[p, 1]);
                 }
                 earsInterleaved[i * 2] += accL * reflG;
                 earsInterleaved[i * 2 + 1] += accR * reflG;
@@ -181,13 +255,23 @@ namespace VirtualStereo.Dsp
                     _revL = new float[frames];
                     _revR = new float[frames];
                 }
-                _reverb.Process(monoL, monoR, _revL, _revR, frames, rate, Model.Rt60(), Damp);
+                Model.Rt60Bands(_rt); // 三带 RT60（面积加权）
+                _reverb.Process(monoL, monoR, _revL, _revR, frames, rate, _rt[0], _rt[1], _rt[2], Damp);
                 for (int i = 0; i < frames; i++)
                 {
                     earsInterleaved[i * 2] += _revL[i] * revG;
                     earsInterleaved[i * 2 + 1] += _revR[i] * revG;
                 }
             }
+        }
+
+        /// <summary>材料 → 每表面每频带 Γ = √(1−α)。</summary>
+        private void RefreshGammas()
+        {
+            for (int s = 0; s < RoomModel.Surfaces; s++)
+                for (int b = 0; b < RoomModel.Bands; b++)
+                    _gamma[s, b] = (float)Math.Sqrt(
+                        Math.Max(0.001, 1.0 - Math.Clamp(Model.Abs[s, b], 0f, 0.999f)));
         }
 
         /// <summary>路径 → 每耳 目标延迟/增益（ITD/ILD），增益一阶平滑。</summary>
