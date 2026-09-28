@@ -53,6 +53,14 @@ namespace VirtualStereo.Desktop
         public float[] CalMeasL { get; set; } = null;
         public float[] CalMeasR { get; set; } = null;
 
+        // 后处理 PEQ（输出调音；8 带，左右同参）
+        public bool PostEnabled { get; set; } = false;
+        public bool[] PostOn { get; set; } = null;
+        public int[] PostType { get; set; } = null;
+        public float[] PostFreq { get; set; } = null;
+        public float[] PostGain { get; set; } = null;
+        public float[] PostQ { get; set; } = null;
+
         // 界面
         public int LastPage { get; set; } = 0;
 

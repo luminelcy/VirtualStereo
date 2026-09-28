@@ -79,6 +79,18 @@ if (settings.CalRate > 0) app.Cal.MeasRate = settings.CalRate;
 app.Cal.LoadMeasured(settings.CalGridHz, settings.CalMeasL, settings.CalMeasR,
     settings.CalF1, settings.CalF2, settings.CalTimeTicks);
 app.Cal.SetEnabled(settings.CalEnabled);
+// 后处理 PEQ（数组长度对不上就用默认值，防手工改配置文件改坏）
+if (settings.PostOn != null && settings.PostOn.Length == PostEq.Bands)
+    for (int i = 0; i < PostEq.Bands; i++) app.Post.On[i] = settings.PostOn[i];
+if (settings.PostType != null && settings.PostType.Length == PostEq.Bands)
+    for (int i = 0; i < PostEq.Bands; i++) app.Post.Type[i] = settings.PostType[i];
+if (settings.PostFreq != null && settings.PostFreq.Length == PostEq.Bands)
+    for (int i = 0; i < PostEq.Bands; i++) app.Post.Freq[i] = settings.PostFreq[i];
+if (settings.PostGain != null && settings.PostGain.Length == PostEq.Bands)
+    for (int i = 0; i < PostEq.Bands; i++) app.Post.GainDb[i] = settings.PostGain[i];
+if (settings.PostQ != null && settings.PostQ.Length == PostEq.Bands)
+    for (int i = 0; i < PostEq.Bands; i++) app.Post.Q[i] = settings.PostQ[i];
+app.Post.SetEnabled(settings.PostEnabled);
 Ui.Init(settings);
 
 void SaveSettings()
@@ -116,6 +128,12 @@ void SaveSettings()
     settings.CalGridHz = app.Cal.HasCurve ? (float[])app.Cal.GridHz.Clone() : null;
     settings.CalMeasL = app.Cal.HasCurve ? (float[])app.Cal.MeasL.Clone() : null;
     settings.CalMeasR = app.Cal.HasCurve ? (float[])app.Cal.MeasR.Clone() : null;
+    settings.PostEnabled = app.Post.Enabled;
+    settings.PostOn = (bool[])app.Post.On.Clone();
+    settings.PostType = (int[])app.Post.Type.Clone();
+    settings.PostFreq = (float[])app.Post.Freq.Clone();
+    settings.PostGain = (float[])app.Post.GainDb.Clone();
+    settings.PostQ = (float[])app.Post.Q.Clone();
     settings.WindowX = window.X;
     settings.WindowY = window.Y;
     settings.WindowW = window.Width;

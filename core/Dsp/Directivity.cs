@@ -220,6 +220,40 @@ namespace VirtualStereo.Dsp
             Set(b0, b1, b2, a0, a1, a2);
         }
 
+        /// <summary>低架 EQ（RBJ low shelf，freq 转折 / 斜率 q / 增益 dB）——后处理补低音用。</summary>
+        public void SetLowShelf(float sr, float freq, float q, float gainDb)
+        {
+            double a = Math.Pow(10.0, gainDb / 40.0);
+            double w0 = 2 * Math.PI * freq / sr;
+            double cosw = Math.Cos(w0), sinw = Math.Sin(w0);
+            double alpha = sinw / (2 * q);
+            double sq = 2 * Math.Sqrt(a) * alpha;
+            double b0 = a * ((a + 1) - (a - 1) * cosw + sq);
+            double b1 = 2 * a * ((a - 1) - (a + 1) * cosw);
+            double b2 = a * ((a + 1) - (a - 1) * cosw - sq);
+            double a0 = (a + 1) + (a - 1) * cosw + sq;
+            double a1 = -2 * ((a - 1) + (a + 1) * cosw);
+            double a2 = (a + 1) + (a - 1) * cosw - sq;
+            Set(b0, b1, b2, a0, a1, a2);
+        }
+
+        /// <summary>高架 EQ（RBJ high shelf）。</summary>
+        public void SetHighShelf(float sr, float freq, float q, float gainDb)
+        {
+            double a = Math.Pow(10.0, gainDb / 40.0);
+            double w0 = 2 * Math.PI * freq / sr;
+            double cosw = Math.Cos(w0), sinw = Math.Sin(w0);
+            double alpha = sinw / (2 * q);
+            double sq = 2 * Math.Sqrt(a) * alpha;
+            double b0 = a * ((a + 1) + (a - 1) * cosw + sq);
+            double b1 = -2 * a * ((a - 1) + (a + 1) * cosw);
+            double b2 = a * ((a + 1) + (a - 1) * cosw - sq);
+            double a0 = (a + 1) - (a - 1) * cosw + sq;
+            double a1 = 2 * ((a - 1) - (a + 1) * cosw);
+            double a2 = (a + 1) - (a - 1) * cosw - sq;
+            Set(b0, b1, b2, a0, a1, a2);
+        }
+
         /// <summary>清零状态（切换校准开关时用，防残留瞬态）。</summary>
         public void Reset() { _z1 = 0f; _z2 = 0f; }
 

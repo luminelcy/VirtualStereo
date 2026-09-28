@@ -380,6 +380,13 @@ namespace VirtualStereo.Desktop
         /// <summary>诊断：取校准 EQ 某带的幅响（dB）。</summary>
         public float MagDbProbe(int ch, int band, float freq) => _eq.MagDb(ch, band, freq);
 
+        /// <summary>校准 EQ 的合成幅响（dB）。未校准或模式关 = 0（输出曲线合成用）。</summary>
+        public float EqMagDb(float freq)
+        {
+            if (!HasCurve || !Enabled) return 0f;
+            return _eq.MagSumDb(0, freq);
+        }
+
         private static void SmoothInto(float[] src, float[] dst, float smoothOct, float gridOct)
         {
             int w = (int)Math.Round(smoothOct / Math.Max(1e-6f, gridOct));
@@ -468,6 +475,16 @@ namespace VirtualStereo.Desktop
             public float MagDb(int ch, int band, float freq)
             {
                 lock (_lock) return _ch[ch][band].MagDb(freq, _rate);
+            }
+
+            public float MagSumDb(int ch, float freq)
+            {
+                lock (_lock)
+                {
+                    float sum = 0f;
+                    for (int b = 0; b < _n; b++) sum += _ch[ch][b].MagDb(freq, _rate);
+                    return sum;
+                }
             }
 
             public void Process(float[] stereo, int frames)

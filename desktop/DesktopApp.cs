@@ -1,6 +1,6 @@
 // 桌面应用状态与音频处理循环：
 //   捕获环 → 前置增益 → [校准扫频注入] → 指向性/距离 → 直通/双耳/ITD+ILD
-//   → 两耳 tap → 校准 EQ → 后置增益 → WASAPI 播放
+//   → 两耳 tap → 校准 EQ → 后处理 PEQ → 后置增益 → WASAPI 播放
 // UI 线程只改字段；音频线程每块读取（字段竞争为良性，参数变更对齐到块边界）。
 using System;
 using VirtualStereo.Capture;
@@ -39,7 +39,11 @@ namespace VirtualStereo.Desktop
         // 校准：扫频测量两耳频响 → 输出侧反相 EQ 拉平（见 Calibration.cs）
         public readonly Calibration Cal = new Calibration();
 
+        // 后处理 PEQ：校准之后、播放之前的输出调音（见 PostEq.cs）
+        public readonly PostEq Post = new PostEq();
+
         public int CaptureRate => _capture != null && _capture.SampleRate > 0 ? _capture.SampleRate : 48000;
+        public int OutputRate => _outputRate;
 
         // ── 状态读数（音频线程写 / UI 读）──
         public volatile float OutPeak;
@@ -237,6 +241,9 @@ namespace VirtualStereo.Desktop
 
             // 校准 EQ：输出侧把两耳频响拉平（校准模式开时生效）
             Cal.Process(_stereo, Chunk);
+
+            // 后处理 PEQ：输出调音（校准之后、播放之前；典型=低架补回被拉平的低音）
+            if (Post.Enabled) Post.Process(_stereo, Chunk, rate);
 
             // 后置增益：模拟之后、出声之前（输出电平）
             float pg = (float)Math.Pow(10.0, PostGainDb / 20.0);

@@ -19,9 +19,10 @@ namespace VirtualStereo.Desktop
         Speakers = 3,    // 音箱设置：分频指向性、图案
         Analysis = 4,    // 两耳分析：波形（ITD）/ 频谱
         Calibration = 5, // 校准：扫频测两耳频响，反相 EQ 拉平
+        PostProcess = 6, // 后处理：输出 PEQ（校准之后、播放之前）
         // ── 未来的家 ──
-        // Recording = 6,  // 录制与回放
-        // Compare = 7,    // A/B 对比
+        // Recording = 7,  // 录制与回放
+        // Compare = 8,    // A/B 对比
     }
 
     internal static class UiState

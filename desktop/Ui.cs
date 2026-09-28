@@ -32,6 +32,7 @@ namespace VirtualStereo.Desktop
             new PanelDef { Id = Page.Speakers, Title = "音箱设置", Subtitle = "分频指向性 · 图案", Draw = DrawSpeakersPanel },
             new PanelDef { Id = Page.Analysis, Title = "两耳分析", Subtitle = "波形 · 频谱", Draw = DrawAnalysisPanel },
             new PanelDef { Id = Page.Calibration, Title = "校准", Subtitle = "扫频 · 频响拉平", Draw = DrawCalibrationPanel },
+            new PanelDef { Id = Page.PostProcess, Title = "后处理", Subtitle = "输出 PEQ · 曲线", Draw = DrawPostPanel },
         };
 
         private struct Row
@@ -940,6 +941,127 @@ namespace VirtualStereo.Desktop
                 var p = new Vector2(x, y);
                 if (i > 0) dl.AddLine(prev, p, col, thickness);
                 prev = p;
+            }
+        }
+
+        // ───────────────────────── 后处理面板 ─────────────────────────
+
+        private static void DrawPostPanel(DesktopApp app)
+        {
+            var eq = app.Post;
+
+            ImGui.Text("输出 PEQ（校准 EQ 之后、播放之前）");
+            ImGui.TextDisabled("左右声道同一套系数；校准拉平后低音显薄，用低架把低频垫回来即可");
+
+            bool en = eq.Enabled;
+            if (ImGui.Checkbox("后处理（应用 PEQ）", ref en)) eq.SetEnabled(en);
+            ImGui.SameLine();
+            if (ImGui.Button("低音+3dB"))
+                SetLowShelfPreset(eq, 3f);
+            ImGui.SameLine();
+            if (ImGui.Button("低音+6dB"))
+                SetLowShelfPreset(eq, 6f);
+            ImGui.SameLine();
+            if (ImGui.Button("全部平直"))
+                eq.ClearAll();
+
+            ImGui.Spacing();
+            ImGui.Text("PEQ 带（勾=启用；每带 峰值/低架/高架，左右同参）");
+            for (int b = 0; b < PostEq.Bands; b++)
+            {
+                bool on = eq.On[b];
+                if (ImGui.Checkbox($"##pon{b}", ref on)) eq.On[b] = on;
+                ImGui.SameLine();
+                int ty = eq.Type[b];
+                ImGui.SetNextItemWidth(72);
+                if (ImGui.Combo($"##ptype{b}", ref ty, PostEq.TypeNames, PostEq.TypeNames.Length))
+                    eq.Type[b] = ty;
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(150);
+                float f = eq.Freq[b];
+                if (ImGui.SliderFloat($"##pf{b}", ref f, 20f, 20000f, "%.0f Hz", ImGuiSliderFlags.Logarithmic))
+                    eq.Freq[b] = f;
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(130);
+                float g = eq.GainDb[b];
+                if (ImGui.SliderFloat($"##pg{b}", ref g, -12f, 12f, "%.1f dB"))
+                    eq.GainDb[b] = g;
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(90);
+                float q = eq.Q[b];
+                if (ImGui.SliderFloat($"##pq{b}", ref q, 0.1f, 10f, "Q %.2f"))
+                    eq.Q[b] = q;
+                ImGui.SameLine();
+                ImGui.TextDisabled("带" + (b + 1));
+            }
+
+            ImGui.Spacing();
+            ImGui.Text("输出曲线（绿=仅后处理 PEQ；白=输出合成）");
+            ImGui.TextDisabled("输出合成 = 校准 EQ（模式开时叠加）+ 后处理 PEQ；调带参数即时更新");
+            DrawPostBox(app);
+        }
+
+        private static void SetLowShelfPreset(PostEq eq, float gainDb)
+        {
+            eq.On[0] = true;
+            eq.Type[0] = PostEq.TypeLowShelf;
+            eq.Freq[0] = 120f;
+            eq.GainDb[0] = gainDb;
+            eq.Q[0] = 0.7071f;
+        }
+
+        private static void DrawPostBox(DesktopApp app)
+        {
+            var eq = app.Post;
+            var cal = app.Cal;
+            int rate = app.OutputRate;
+
+            float w = Math.Min(900f, Math.Max(360f, ImGui.GetContentRegionAvail().X));
+            const float h = 180f;
+            Vector2 origin = ImGui.GetCursorScreenPos();
+            ImGui.Dummy(new Vector2(w, h));
+            var dl = ImGui.GetWindowDrawList();
+            dl.AddRectFilled(origin, origin + new Vector2(w, h), Col(24, 24, 30));
+            dl.AddRect(origin, origin + new Vector2(w, h), Col(60, 60, 70));
+
+            const float fLo = 20f, fHi = 20000f;
+            float lo = (float)Math.Log10(fLo), hi = (float)Math.Log10(fHi);
+            const float dbLo = -36f, dbHi = 18f;
+
+            foreach (int f in new[] { 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000 })
+            {
+                float x = origin.X + w * ((float)Math.Log10(f) - lo) / (hi - lo);
+                dl.AddLine(new Vector2(x, origin.Y), new Vector2(x, origin.Y + h), Col(45, 48, 58));
+                string lbl = f >= 1000 ? (f / 1000) + "k" : f.ToString(CultureInfo.InvariantCulture);
+                dl.AddText(new Vector2(x + 3, origin.Y + h - 16), Col(95, 100, 115), lbl);
+            }
+            foreach (int db in new[] { 12, 0, -12, -24, -36 })
+            {
+                float y = origin.Y + h * (dbHi - db) / (dbHi - dbLo);
+                dl.AddLine(new Vector2(origin.X, y), new Vector2(origin.X + w, y),
+                    db == 0 ? Col(70, 75, 90) : Col(45, 48, 58));
+                dl.AddText(new Vector2(origin.X + 4, y + 2), Col(95, 100, 115),
+                    db.ToString(CultureInfo.InvariantCulture));
+            }
+
+            // 逐像素取样：仅 PEQ / 输出合成 两条
+            Vector2 prevP = default, prevT = default;
+            for (int x = 0; x <= (int)w; x++)
+            {
+                float f = (float)Math.Pow(10.0, lo + (hi - lo) * x / w);
+                float peq = eq.MagDb(f, rate);
+                float tot = peq + cal.EqMagDb(f);
+                float yp = origin.Y + h * (dbHi - Math.Clamp(peq, dbLo, dbHi)) / (dbHi - dbLo);
+                float yt = origin.Y + h * (dbHi - Math.Clamp(tot, dbLo, dbHi)) / (dbHi - dbLo);
+                var pp = new Vector2(origin.X + x, yp);
+                var pt = new Vector2(origin.X + x, yt);
+                if (x > 0)
+                {
+                    dl.AddLine(prevP, pp, Col(120, 220, 120), 1.4f);
+                    dl.AddLine(prevT, pt, Col(225, 225, 230), 1.2f);
+                }
+                prevP = pp;
+                prevT = pt;
             }
         }
 
