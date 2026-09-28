@@ -3,6 +3,7 @@
 // UI 线程只改字段；音频线程每块读取（字段竞争为良性，参数变更对齐到块边界）。
 using System;
 using VirtualStereo.Capture;
+using VirtualStereo.Dsp;
 using VirtualStereo.Phonon;
 
 namespace VirtualStereo.Desktop
@@ -18,6 +19,9 @@ namespace VirtualStereo.Desktop
         public volatile float AzL = -30f, AzR = 30f, ElL = 0f, ElR = 0f;
         public volatile int Interpolation = 1; // 0 最近邻 / 1 双线性
         public volatile bool SilenceOriginal = true;
+
+        // 音箱指向性（分频模拟频率相关指向性；配置在"音箱设置"面板改）
+        public readonly DirectivityProcessor Directivity = new DirectivityProcessor();
 
         // ── 状态读数（音频线程写 / UI 读）──
         public volatile float OutPeak;
@@ -128,6 +132,13 @@ namespace VirtualStereo.Desktop
 
             float g = (float)Math.Pow(10.0, PreGainDb / 20.0);
             for (int i = 0; i < Chunk; i++) { _monoL[i] *= g; _monoR[i] *= g; }
+
+            // 音箱指向性（分频）：前置增益之后、空间模拟之前
+            if (Directivity.Enabled)
+            {
+                Directivity.Process(_monoL, Chunk, rate, AzL, ElL);
+                Directivity.Process(_monoR, Chunk, rate, AzR, ElR);
+            }
 
             lock (_dspLock)
             {

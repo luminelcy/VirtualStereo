@@ -48,6 +48,18 @@ app.AzR = settings.AzR;
 app.ElL = settings.ElL;
 app.ElR = settings.ElR;
 app.Interpolation = settings.Interpolation;
+app.Directivity.Enabled = settings.DirEnabled;
+app.Directivity.FreqLowMid = settings.DirFreqLowMid;
+app.Directivity.FreqMidHigh = settings.DirFreqMidHigh;
+app.Directivity.WLow = settings.DirWLow;
+app.Directivity.WMid = settings.DirWMid;
+app.Directivity.WHigh = settings.DirWHigh;
+app.Directivity.PLow = settings.DirPLow;
+app.Directivity.PMid = settings.DirPMid;
+app.Directivity.PHigh = settings.DirPHigh;
+app.Directivity.Aim = settings.DirAim;
+app.Directivity.AimAz = settings.DirAimAz;
+app.Directivity.AimEl = settings.DirAimEl;
 Ui.Init(settings);
 
 void SaveSettings()
@@ -62,6 +74,18 @@ void SaveSettings()
     settings.ElR = app.ElR;
     settings.Interpolation = app.Interpolation;
     settings.SofaPath = Ui.CurrentSofaPath;
+    settings.DirEnabled = app.Directivity.Enabled;
+    settings.DirFreqLowMid = app.Directivity.FreqLowMid;
+    settings.DirFreqMidHigh = app.Directivity.FreqMidHigh;
+    settings.DirWLow = app.Directivity.WLow;
+    settings.DirWMid = app.Directivity.WMid;
+    settings.DirWHigh = app.Directivity.WHigh;
+    settings.DirPLow = app.Directivity.PLow;
+    settings.DirPMid = app.Directivity.PMid;
+    settings.DirPHigh = app.Directivity.PHigh;
+    settings.DirAim = app.Directivity.Aim;
+    settings.DirAimAz = app.Directivity.AimAz;
+    settings.DirAimEl = app.Directivity.AimEl;
     settings.WindowX = window.X;
     settings.WindowY = window.Y;
     settings.WindowW = window.Width;

@@ -27,6 +27,7 @@ namespace VirtualStereo.Desktop
             new PanelDef { Id = Page.Main, Title = "主面板", Subtitle = "音源与运行状态", Draw = DrawMainPanel },
             new PanelDef { Id = Page.Processing, Title = "处理", Subtitle = "前后增益 · 电平", Draw = DrawProcessingPanel },
             new PanelDef { Id = Page.Spatial, Title = "空间模拟", Subtitle = "模式 · 方位 · HRTF", Draw = DrawSpatialPanel },
+            new PanelDef { Id = Page.Speakers, Title = "音箱设置", Subtitle = "分频指向性 · 朝向", Draw = DrawSpeakersPanel },
         };
 
         private struct Row
@@ -272,6 +273,85 @@ namespace VirtualStereo.Desktop
                 app.LoadSofa(null);
                 _status = "已恢复内置 HRTF（CIPIC #124）";
             }
+        }
+
+        // ───────────────────────── 音箱设置面板（分频指向性） ─────────────────────────
+
+        private static void DrawSpeakersPanel(DesktopApp app)
+        {
+            var d = app.Directivity;
+
+            bool en = d.Enabled;
+            if (ImGui.Checkbox("启用指向性（分频模拟）", ref en)) d.Enabled = en;
+            ImGui.TextDisabled("信号链: 前置增益 -> 分频指向性 -> 空间模拟 -> 后置增益");
+            ImGui.TextDisabled("指向性属声源属性（真实喇叭低频绕射、高频聚拢），三种空间模式共用");
+
+            ImGui.Spacing();
+            ImGui.Text("分频点");
+            float f1 = d.FreqLowMid;
+            ImGui.SetNextItemWidth(260);
+            if (ImGui.SliderFloat("低/中 分频", ref f1, 60f, 1500f, "%.0f Hz")) d.FreqLowMid = f1;
+            float f2 = d.FreqMidHigh;
+            ImGui.SetNextItemWidth(260);
+            if (ImGui.SliderFloat("中/高 分频", ref f2, 400f, 8000f, "%.0f Hz")) d.FreqMidHigh = f2;
+
+            ImGui.Spacing();
+            ImGui.Text("分带图案  权重: 0=全向 0.5=心形 1=8字    锐度: 越大越窄");
+
+            float w;
+            w = d.WLow;
+            ImGui.SetNextItemWidth(150);
+            if (ImGui.SliderFloat("低频 权重", ref w, 0f, 1f, "%.2f")) d.WLow = w;
+            ImGui.SameLine();
+            w = d.PLow;
+            ImGui.SetNextItemWidth(150);
+            if (ImGui.SliderFloat("低频 锐度", ref w, 0.3f, 4f, "%.1f")) d.PLow = w;
+
+            w = d.WMid;
+            ImGui.SetNextItemWidth(150);
+            if (ImGui.SliderFloat("中频 权重", ref w, 0f, 1f, "%.2f")) d.WMid = w;
+            ImGui.SameLine();
+            w = d.PMid;
+            ImGui.SetNextItemWidth(150);
+            if (ImGui.SliderFloat("中频 锐度", ref w, 0.3f, 4f, "%.1f")) d.PMid = w;
+
+            w = d.WHigh;
+            ImGui.SetNextItemWidth(150);
+            if (ImGui.SliderFloat("高频 权重", ref w, 0f, 1f, "%.2f")) d.WHigh = w;
+            ImGui.SameLine();
+            w = d.PHigh;
+            ImGui.SetNextItemWidth(150);
+            if (ImGui.SliderFloat("高频 锐度", ref w, 0.3f, 4f, "%.1f")) d.PHigh = w;
+
+            ImGui.Spacing();
+            if (ImGui.Button("预设 全向")) { d.WLow = 0f; d.WMid = 0f; d.WHigh = 0f; d.PLow = d.PMid = d.PHigh = 1f; }
+            ImGui.SameLine();
+            if (ImGui.Button("预设 均匀心形")) { d.WLow = 0.5f; d.WMid = 0.5f; d.WHigh = 0.5f; d.PLow = d.PMid = d.PHigh = 1f; }
+            ImGui.SameLine();
+            if (ImGui.Button("预设 高频聚拢")) { d.WLow = 0f; d.WMid = 0.4f; d.WHigh = 0.9f; d.PLow = 1f; d.PMid = 1.5f; d.PHigh = 2f; }
+
+            ImGui.Spacing();
+            ImGui.Text("朝向（决定离轴角 theta）");
+            int aim = d.Aim;
+            if (ImGui.RadioButton("朝向听者", ref aim, 0)) d.Aim = aim;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("固定朝前", ref aim, 1)) d.Aim = aim;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("手动", ref aim, 2)) d.Aim = aim;
+            if (aim == 2)
+            {
+                float aa = d.AimAz, ae = d.AimEl;
+                ImGui.SetNextItemWidth(260);
+                if (ImGui.SliderFloat("朝向 方位角", ref aa, -180f, 180f, "%.0f")) d.AimAz = aa;
+                ImGui.SetNextItemWidth(260);
+                if (ImGui.SliderFloat("朝向 仰角", ref ae, -90f, 90f, "%.0f")) d.AimEl = ae;
+            }
+            ImGui.TextDisabled("朝向听者=平直响应；固定朝前=声源偏离正前方即可听出高频变暗");
+
+            ImGui.Spacing();
+            d.GainsAt(app.AzL, app.ElL, out float gl0, out float gl1, out float gl2);
+            d.GainsAt(app.AzR, app.ElR, out float gr0, out float gr1, out float gr2);
+            ImGui.Text($"当前分带增益  L: 低{gl0:F2} 中{gl1:F2} 高{gl2:F2}    R: 低{gr0:F2} 中{gr1:F2} 高{gr2:F2}");
         }
 
         // ───────────────────────── 共用 ─────────────────────────
