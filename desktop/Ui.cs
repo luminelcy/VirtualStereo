@@ -834,8 +834,7 @@ namespace VirtualStereo.Desktop
                 ImGui.SameLine();
                 ImGui.Text(cal.State == Calibration.Analyzing
                     ? "分析中..."
-                    : (cal.State == Calibration.SweepL ? "左音箱" : "右音箱")
-                        + $" 扫频 {cal.Progress * 100:F0}%  {cal.CurFreq:F0}Hz");
+                    : $"双音箱扫频 {cal.Progress * 100:F0}%  {cal.CurFreq:F0}Hz");
             }
             else
             {
@@ -879,7 +878,7 @@ namespace VirtualStereo.Desktop
             if (!cal.HasCurve)
             {
                 ImGui.Spacing();
-                ImGui.TextDisabled("点「开始校准」后自动完成：左音箱扫频 -> 右音箱扫频 -> 分析出两耳频响");
+                ImGui.TextDisabled("点「开始校准」后自动完成：双音箱同时扫频 -> 分析出两耳频响");
                 return;
             }
 

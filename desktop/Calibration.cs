@@ -6,9 +6,9 @@
 // 测量 tap 在校准 EQ 之前 → 重校准永远测的是裸链路，与校准开关无关；
 // 两耳分析/录制也始终是裸双耳信号（实验数据），EQ 只作用于耳机回放这最后一段。
 //
-// 测量：顺序扫两遍——左音箱播扫频（右静默）→ 右音箱扫（左静默），
-// 对数扫频 10Hz .. min(24k, 0.495×fs)。线性系统下两条 FRF 复数相加
-// = 双音箱同时扫频的结果，即"该耳的频响曲线"。
+// 测量：双音箱**同时**扫频（同一对数扫频信号分别进两路音箱），
+// 10Hz .. min(24k, 0.495×fs)；两耳 tap 各直接测得一条 FRF——即"该耳的
+// 频响曲线"（= 左右两路传递函数之和）。
 //
 // 反相：H = Y·conj(S)/|S|²（谱除，弱能量 bin 跳过）→ 对数栅格带内平均
 // → 平滑 → 中带归一（不改整体响度）→ 限幅（深谷不猛抬）→ 每耳
@@ -32,8 +32,8 @@ namespace VirtualStereo.Desktop
         public const int MaxBands = 32; // 校准 EQ 峰化带上限
 
         // ── 状态机（音频线程推进 / UI 轮询）──
-        public const int Idle = 0, SweepL = 1, SweepR = 2,
-                          Done = 3, Analyzing = 4, Ready = 5, Failed = 6;
+        public const int Idle = 0, Sweep = 1,
+                          Done = 2, Analyzing = 3, Ready = 4, Failed = 5;
 
         public volatile int State = Idle;
         public volatile float Progress;    // 0..1
@@ -64,12 +64,12 @@ namespace VirtualStereo.Desktop
         // ── 扫频发生/捕获（音频线程）──
         private double _L;               // 扫频指数：phase = 2π f1 L (e^{t/L} − 1)
         private int _sweepLen, _tailLen; // 样本数
-        private long _pos;               // 全程单调计数 0..2*(sweepLen+tailLen)
+        private long _pos;               // 全程单调计数 0..sweepLen+tailLen
         private long _blkBase;           // 本块起点（OnEars 与 Generate 同块对齐）
         private bool _blkActive;
         private int _rate = 48000;
         private int _runId;
-        private float[] _capL0, _capR0, _capL1, _capR1;
+        private float[] _capL, _capR;
 
         // 设计 scratch（UI 线程）
         private readonly float[] _smL = new float[GridN];
@@ -80,7 +80,7 @@ namespace VirtualStereo.Desktop
 
         private readonly Corrector _eq = new Corrector();
 
-        public bool IsBusy => State == SweepL || State == SweepR || State == Analyzing;
+        public bool IsBusy => State == Sweep || State == Analyzing;
 
         /// <summary>启动校准。返回 null=成功 / 错误信息。</summary>
         public string Start(int sampleRate)
@@ -94,15 +94,15 @@ namespace VirtualStereo.Desktop
             _L = SweepSeconds / Math.Log(MeasF2 / F1);
             _sweepLen = (int)(SweepSeconds * sampleRate);
             _tailLen = (int)(TailSeconds * sampleRate);
-            int per = _sweepLen + _tailLen;
-            _capL0 = new float[per]; _capR0 = new float[per];
-            _capL1 = new float[per]; _capR1 = new float[per];
+            int n = _sweepLen + _tailLen;
+            _capL = new float[n];
+            _capR = new float[n];
             _pos = 0;
             _blkActive = false;
             Message = "";
             DoneAtTicks = 0;
             _runId++;
-            State = SweepL;
+            State = Sweep;
             Progress = 0f;
             return null;
         }
@@ -116,44 +116,37 @@ namespace VirtualStereo.Desktop
             Progress = 0f;
         }
 
-        // ── 音频线程：生成扫频（替换两路音箱信号）──
+        // ── 音频线程：生成扫频（替换两路音箱信号，双音箱同扫）──
         public void Generate(float[] monoL, float[] monoR, int frames, int sampleRate)
         {
-            int st = State;
-            if (st != SweepL && st != SweepR) { _blkActive = false; return; }
+            if (State != Sweep) { _blkActive = false; return; }
 
-            long per = _sweepLen + _tailLen;
-            long total = per * 2;
+            int total = _sweepLen + _tailLen;
             _blkBase = _pos;
             _blkActive = true;
-            State = _pos < per ? SweepL : SweepR; // 块粒度切换"左/右音箱"显示
 
             for (int i = 0; i < frames; i++)
             {
                 long p = _pos + i;
-                if (p >= total) { monoL[i] = 0f; monoR[i] = 0f; continue; }
-                bool left = p < per;
-                long local = left ? p : p - per;
-                if (local < _sweepLen)
+                if (p >= _sweepLen)
                 {
-                    // 无状态发生器：相位由样本位置直接算（长扫不漂移）
-                    double t = local / (double)sampleRate;
-                    double ph = 2.0 * Math.PI * F1 * _L * (Math.Exp(t / _L) - 1.0);
-                    float s = (float)(Amp * Math.Sin(ph));
-                    if (left) { monoL[i] = s; monoR[i] = 0f; }
-                    else { monoL[i] = 0f; monoR[i] = s; }
+                    monoL[i] = 0f; monoR[i] = 0f; // 尾巴：静默收冲出
+                    continue;
                 }
-                else { monoL[i] = 0f; monoR[i] = 0f; } // 尾巴：静默收冲出
+                // 无状态发生器：相位由样本位置直接算（长扫不漂移）
+                double t = p / (double)sampleRate;
+                double ph = 2.0 * Math.PI * F1 * _L * (Math.Exp(t / _L) - 1.0);
+                float s = (float)(Amp * Math.Sin(ph));
+                monoL[i] = s; // 双音箱同时播同一扫频
+                monoR[i] = s;
             }
 
             long after = _pos + frames;
             long shown = after < total ? after : total;
             Progress = (float)(shown / (double)total);
             long cur = shown < total ? shown : total - 1;
-            bool curLeft = cur < per;
-            long curLocal = curLeft ? cur : cur - per;
-            CurFreq = curLocal < _sweepLen
-                ? (float)(F1 * Math.Exp((curLocal / (double)sampleRate) / _L))
+            CurFreq = cur < _sweepLen
+                ? (float)(F1 * Math.Exp((cur / (double)sampleRate) / _L))
                 : 0f;
 
             _pos = after;
@@ -163,21 +156,16 @@ namespace VirtualStereo.Desktop
         /// <summary>音频线程：两耳 tap 捕获（与 Generate 的块对齐）。</summary>
         public void OnEars(float[] stereo, int frames)
         {
-            if (!_blkActive) return;
-            long per = _sweepLen + _tailLen;
-            long total = per * 2;
-            bool left = _blkBase < per;
-            float[] cl = left ? _capL0 : _capL1;
-            float[] cr = left ? _capR0 : _capR1;
-            if (cl == null || cr == null) return;
+            if (!_blkActive || _capL == null || _capR == null) return;
+            int total = _sweepLen + _tailLen;
             for (int i = 0; i < frames; i++)
             {
                 long p = _blkBase + i;
                 if (p >= total) break;
-                int off = (int)(left ? p : p - per);
-                if (off < 0 || off >= cl.Length) continue;
-                cl[off] = stereo[i * 2];
-                cr[off] = stereo[i * 2 + 1];
+                int off = (int)p;
+                if (off >= _capL.Length) continue;
+                _capL[off] = stereo[i * 2];
+                _capR[off] = stereo[i * 2 + 1];
             }
         }
 
@@ -215,8 +203,8 @@ namespace VirtualStereo.Desktop
         private void AnalyzeCore(int runId)
         {
             // 先抓本地引用，防与下一轮 Start 互踩
-            float[] cL0 = _capL0, cR0 = _capR0, cL1 = _capL1, cR1 = _capR1;
-            if (cL0 == null || cR0 == null || cL1 == null || cR1 == null)
+            float[] cL = _capL, cR = _capR;
+            if (cL == null || cR == null)
             {
                 Message = "无测量数据";
                 State = Failed;
@@ -247,21 +235,18 @@ namespace VirtualStereo.Desktop
             }
             float thr = maxS2 * 1e-6f; // 扫频带外弱能量 bin 跳过
 
-            // 两耳复数 H 累加 = 左扫 + 右扫（线性系统叠加 = 双音箱同时扫频）
+            // 每耳 H = Y·conj(S)/|S|²（双音箱同扫，测得即两路传递函数之和）
             var hLRe = new float[p]; var hLIm = new float[p];
             var hRRe = new float[p]; var hRIm = new float[p];
-            AccumulateOne(cL0, sRe, sIm, thr, hLRe, hLIm, p);
-            AccumulateOne(cR0, sRe, sIm, thr, hRRe, hRIm, p);
-            if (runId != _runId) return;
-            AccumulateOne(cL1, sRe, sIm, thr, hLRe, hLIm, p);
-            AccumulateOne(cR1, sRe, sIm, thr, hRRe, hRIm, p);
+            AccumulateOne(cL, sRe, sIm, thr, hLRe, hLIm, p);
+            AccumulateOne(cR, sRe, sIm, thr, hRRe, hRIm, p);
             if (runId != _runId) return;
 
             BuildGrid();
             ToGrid(hLRe, hLIm, sRe, sIm, thr, p, rate, GridHz, MeasL);
             ToGrid(hRRe, hRIm, sRe, sIm, thr, p, rate, GridHz, MeasR);
 
-            _capL0 = _capR0 = _capL1 = _capR1 = null; // 捕获缓冲用完即放（约 8MB）
+            _capL = _capR = null; // 捕获缓冲用完即放
             DoneAtTicks = DateTime.Now.Ticks;
             HasCurve = true;
             DesignDirty = true;
