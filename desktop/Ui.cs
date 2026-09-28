@@ -16,9 +16,12 @@ namespace VirtualStereo.Desktop
         private struct Row
         {
             public int Pid;
+            public string Name;
             public string Display;
         }
 
+        private static Settings _cfg;
+        private static string _pendingName = ""; // 上次会话的进程名：扫描到就自动选中
         private static string _search = "";
         private static string _sofaPath = "";
         private static string _status = "选择进程后点「开始捕获」";
@@ -30,22 +33,36 @@ namespace VirtualStereo.Desktop
         private static string _postGainText = "";
         private static bool _silenceTmp = true;
 
+        public static string CurrentSofaPath => _sofaPath;
+
+        public static void Init(Settings s)
+        {
+            _cfg = s;
+            _sofaPath = s.SofaPath ?? "";
+            _pendingName = s.LastProcessName ?? "";
+        }
+
         public static void Draw(DesktopApp app)
         {
-            ImGui.SetNextWindowPos(new System.Numerics.Vector2(10, 10), ImGuiCond.Once);
-            ImGui.SetNextWindowSize(new System.Numerics.Vector2(1060, 690), ImGuiCond.Once);
-            ImGui.Begin("VirtualStereo Desktop");
+            // 铺满视口的固定宿主：无标题栏/不可拖/不可折叠——
+            // 内窗口若可拖动，拖出外窗口可视区就找不回来（用户实测反馈）
+            var io = ImGui.GetIO();
+            ImGui.SetNextWindowPos(System.Numerics.Vector2.Zero);
+            ImGui.SetNextWindowSize(io.DisplaySize);
+            ImGui.Begin("##host", ImGuiWindowFlags.NoDecoration | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoSavedSettings);
 
-            DrawSourcePanel(app);
+            float srcH = Math.Max(160f, io.DisplaySize.Y * 0.32f);
+            DrawSourcePanel(app, srcH);
             ImGui.Separator();
 
             // 处理 | 空间模拟 两个独立面板
+            float panelH = Math.Max(300f, io.DisplaySize.Y - srcH - 230f);
             float half = (ImGui.GetContentRegionAvail().X - 8f) / 2f;
-            ImGui.BeginChild("##processing", new System.Numerics.Vector2(half, 330), true);
+            ImGui.BeginChild("##processing", new System.Numerics.Vector2(half, panelH), true);
             DrawProcessingPanel(app);
             ImGui.EndChild();
             ImGui.SameLine();
-            ImGui.BeginChild("##spatial", new System.Numerics.Vector2(0, 330), true);
+            ImGui.BeginChild("##spatial", new System.Numerics.Vector2(0, panelH), true);
             DrawSpatialPanel(app);
             ImGui.EndChild();
 
@@ -55,9 +72,9 @@ namespace VirtualStereo.Desktop
 
         // ─────────────── 音源（进程树选择器） ───────────────
 
-        private static void DrawSourcePanel(DesktopApp app)
+        private static void DrawSourcePanel(DesktopApp app, float listHeight)
         {
-            ImGui.Text("音源（程序集=进程树；♪=正在发声；捕获=选中节点及其子进程）");
+            ImGui.Text("音源（程序集=进程树；[响]=正在发声；捕获=选中节点及其子进程）");
             ImGui.InputText("搜索", ref _search, 64);
             ImGui.SameLine();
             if (ImGui.Button("刷新")) Rescan(true);
@@ -77,7 +94,7 @@ namespace VirtualStereo.Desktop
 
             if (Environment.TickCount64 >= _nextScanAt) Rescan(false);
 
-            ImGui.BeginChild("proclist", new System.Numerics.Vector2(-1, 200), true);
+            ImGui.BeginChild("proclist", new System.Numerics.Vector2(-1, listHeight), true);
             foreach (var row in _rows)
             {
                 bool selected = row.Pid == _selectedPid;
@@ -85,6 +102,7 @@ namespace VirtualStereo.Desktop
                 {
                     _selectedPid = row.Pid;
                     _selectedName = row.Display.Trim();
+                    if (_cfg != null) _cfg.LastProcessName = row.Name;
                 }
             }
             if (_rows.Count == 0)
@@ -146,17 +164,33 @@ namespace VirtualStereo.Desktop
             foreach (var r in roots) Walk(r.Pid, 0);
 
             _rows = rows;
+
+            // 设置记忆：启动后第一次扫到上次的进程名就自动选中（不自动开捕获）
+            if (_selectedPid <= 0 && _pendingName.Length > 0)
+            {
+                foreach (var r in rows)
+                {
+                    if (string.Equals(r.Name, _pendingName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _selectedPid = r.Pid;
+                        _selectedName = r.Display.Trim();
+                        break;
+                    }
+                }
+            }
         }
 
         private static Row MakeRow(ProcessTree.ProcInfo p, int depth,
             Dictionary<uint, string> titles, HashSet<int> active)
         {
             string indent = depth == 0 ? "" : new string(' ', depth * 2) + "└ ";
-            string badge = active.Contains(p.Pid) ? "♪ " : "  ";
+            // 用 [响] 而不是 ♪：雅黑的字形范围里没有音符字符（实测渲染成 ?）
+            string badge = active.Contains(p.Pid) ? "[响] " : "     ";
             string title = titles.TryGetValue((uint)p.Pid, out var t) ? " — " + t : "";
             return new Row
             {
                 Pid = p.Pid,
+                Name = p.Name,
                 Display = indent + badge + p.Name + " [" + p.Pid + "]" + title,
             };
         }

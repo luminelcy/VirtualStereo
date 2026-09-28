@@ -1,5 +1,6 @@
 // VirtualStereo Desktop —— 桌面壳入口：Veldrid 窗口 + ImGui 界面 + WASAPI 播放。
-// 端到端：选进程 → 捕获 → 前置增益/双耳 → 播放；面板实时可调。
+// 端到端：选进程 → 捕获 → 前置增益/双耳 → 后置增益 → 播放；面板实时可调。
+// 设置记忆：启动载入 / 运行中定期保存 / 退出保存（VirtualStereo.settings.json）。
 using System;
 using ImGuiNET;
 using Veldrid;
@@ -10,7 +11,12 @@ using VirtualStereo.Desktop;
 VsLog.OnInfo = s => Console.WriteLine(s);
 VsLog.OnError = s => Console.Error.WriteLine("[E] " + s);
 
-var windowCI = new WindowCreateInfo(80, 80, 1100, 740, WindowState.Normal, "VirtualStereo Desktop");
+var settings = Settings.Load();
+
+var windowCI = new WindowCreateInfo(
+    settings.WindowX, settings.WindowY,
+    Math.Max(640, settings.WindowW), Math.Max(480, settings.WindowH),
+    WindowState.Normal, "VirtualStereo Desktop");
 var gdCI = new GraphicsDeviceOptions(true, null, true, default, true, true);
 VeldridStartup.CreateWindowAndGraphicsDevice(windowCI, gdCI, out var window, out var gd);
 var cl = gd.ResourceFactory.CreateCommandList();
@@ -31,7 +37,40 @@ window.Resized += () =>
 };
 
 using var app = new DesktopApp();
+
+// 设置 → 应用状态
+app.PreGainDb = settings.PreGainDb;
+app.PostGainDb = settings.PostGainDb;
+app.SilenceOriginal = settings.SilenceOriginal;
+app.CurrentMode = settings.Mode;
+app.AzL = settings.AzL;
+app.AzR = settings.AzR;
+app.ElL = settings.ElL;
+app.ElR = settings.ElR;
+app.Interpolation = settings.Interpolation;
+Ui.Init(settings);
+
+void SaveSettings()
+{
+    settings.PreGainDb = app.PreGainDb;
+    settings.PostGainDb = app.PostGainDb;
+    settings.SilenceOriginal = app.SilenceOriginal;
+    settings.Mode = app.CurrentMode;
+    settings.AzL = app.AzL;
+    settings.AzR = app.AzR;
+    settings.ElL = app.ElL;
+    settings.ElR = app.ElR;
+    settings.Interpolation = app.Interpolation;
+    settings.SofaPath = Ui.CurrentSofaPath;
+    settings.WindowX = window.X;
+    settings.WindowY = window.Y;
+    settings.WindowW = window.Width;
+    settings.WindowH = window.Height;
+    settings.Save();
+}
+
 var last = DateTime.UtcNow;
+var nextAutoSave = DateTime.UtcNow.AddSeconds(5);
 
 while (window.Exists)
 {
@@ -52,6 +91,13 @@ while (window.Exists)
     cl.End();
     gd.SubmitCommands(cl);
     gd.SwapBuffers(gd.MainSwapchain);
+
+    if (now >= nextAutoSave)
+    {
+        nextAutoSave = now.AddSeconds(5);
+        SaveSettings(); // 定期保存，崩溃也不丢太多
+    }
 }
 
 app.StopCapture();
+SaveSettings();
