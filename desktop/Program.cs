@@ -48,6 +48,8 @@ app.AzL = settings.AzL;
 app.AzR = settings.AzR;
 app.ElL = settings.ElL;
 app.ElR = settings.ElR;
+app.DistL = settings.DistL;
+app.DistR = settings.DistR;
 app.Interpolation = settings.Interpolation;
 app.Directivity.Enabled = settings.DirEnabled;
 if (settings.DirFreqs != null && settings.DirFreqs.Length == DirectivityProcessor.Splits)
@@ -71,6 +73,8 @@ void SaveSettings()
     settings.AzR = app.AzR;
     settings.ElL = app.ElL;
     settings.ElR = app.ElR;
+    settings.DistL = app.DistL;
+    settings.DistR = app.DistR;
     settings.Interpolation = app.Interpolation;
     settings.SofaPath = Ui.CurrentSofaPath;
     settings.DirEnabled = app.Directivity.Enabled;

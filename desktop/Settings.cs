@@ -19,6 +19,8 @@ namespace VirtualStereo.Desktop
         public float AzR { get; set; } = 30f;
         public float ElL { get; set; } = 0f;
         public float ElR { get; set; } = 0f;
+        public float DistL { get; set; } = 2f;
+        public float DistR { get; set; } = 2f;
         public int Interpolation { get; set; } = 1;
         public string SofaPath { get; set; } = "";
 

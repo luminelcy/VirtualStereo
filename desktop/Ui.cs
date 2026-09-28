@@ -28,7 +28,7 @@ namespace VirtualStereo.Desktop
             new PanelDef { Id = Page.Main, Title = "主面板", Subtitle = "音源与运行状态", Draw = DrawMainPanel },
             new PanelDef { Id = Page.Processing, Title = "处理", Subtitle = "前后增益 · 电平", Draw = DrawProcessingPanel },
             new PanelDef { Id = Page.Spatial, Title = "空间模拟", Subtitle = "模式 · 方位 · HRTF", Draw = DrawSpatialPanel },
-            new PanelDef { Id = Page.Speakers, Title = "音箱设置", Subtitle = "分频指向性 · 朝向", Draw = DrawSpeakersPanel },
+            new PanelDef { Id = Page.Speakers, Title = "音箱设置", Subtitle = "分频指向性 · 图案", Draw = DrawSpeakersPanel },
         };
 
         private struct Row
@@ -245,18 +245,51 @@ namespace VirtualStereo.Desktop
             ImGui.SameLine();
             if (ImGui.RadioButton("ITD+ILD", ref mode, 2)) app.CurrentMode = mode;
 
+            // 声源几何：方位 / 仰角 / 距离
             ImGui.Spacing();
-            ImGui.Text("声源方位（头坐标系：正前方 0°，右正）");
-            float azL = app.AzL, azR = app.AzR, eL = app.ElL, eR = app.ElR;
-            ImGui.SetNextItemWidth(260);
-            if (ImGui.SliderFloat("L 方位角", ref azL, -180f, 180f, "%.0f°")) app.AzL = azL;
-            ImGui.SetNextItemWidth(260);
-            if (ImGui.SliderFloat("R 方位角", ref azR, -180f, 180f, "%.0f°")) app.AzR = azR;
-            ImGui.SetNextItemWidth(260);
-            if (ImGui.SliderFloat("L 仰角", ref eL, -90f, 90f, "%.0f°")) app.ElL = eL;
-            ImGui.SetNextItemWidth(260);
-            if (ImGui.SliderFloat("R 仰角", ref eR, -90f, 90f, "%.0f°")) app.ElR = eR;
+            ImGui.Text("声源几何（头坐标系：正前 0°，右正；距离 2m 为参考）");
+            float azL = app.AzL, eL = app.ElL, dL = app.DistL;
+            ImGui.SetNextItemWidth(190);
+            if (ImGui.SliderFloat("L 方位角", ref azL, -180f, 180f, "%.0f")) app.AzL = azL;
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(190);
+            if (ImGui.SliderFloat("L 仰角", ref eL, -90f, 90f, "%.0f")) app.ElL = eL;
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(190);
+            if (ImGui.SliderFloat("L 距离", ref dL, 0.3f, 20f, "%.1f m")) app.DistL = dL;
 
+            float azR = app.AzR, eR = app.ElR, dR = app.DistR;
+            ImGui.SetNextItemWidth(190);
+            if (ImGui.SliderFloat("R 方位角", ref azR, -180f, 180f, "%.0f")) app.AzR = azR;
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(190);
+            if (ImGui.SliderFloat("R 仰角", ref eR, -90f, 90f, "%.0f")) app.ElR = eR;
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(190);
+            if (ImGui.SliderFloat("R 距离", ref dR, 0.3f, 20f, "%.1f m")) app.DistR = dR;
+
+            ImGui.Text($"距离衰减（反比，每翻倍 -6dB）  L: {AttenDb(app.DistL):F1} dB   R: {AttenDb(app.DistR):F1} dB");
+
+            // 音箱朝向（决定指向性的离轴角；图案本身在「音箱设置」）
+            ImGui.Spacing();
+            ImGui.Text("音箱朝向");
+            int aim = app.Directivity.Aim;
+            if (ImGui.RadioButton("朝向听者", ref aim, 0)) app.Directivity.Aim = aim;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("固定朝前", ref aim, 1)) app.Directivity.Aim = aim;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("手动", ref aim, 2)) app.Directivity.Aim = aim;
+            if (aim == 2)
+            {
+                float aa = app.Directivity.AimAz, ae = app.Directivity.AimEl;
+                ImGui.SetNextItemWidth(260);
+                if (ImGui.SliderFloat("朝向 方位角", ref aa, -180f, 180f, "%.0f")) app.Directivity.AimAz = aa;
+                ImGui.SetNextItemWidth(260);
+                if (ImGui.SliderFloat("朝向 仰角", ref ae, -90f, 90f, "%.0f")) app.Directivity.AimEl = ae;
+            }
+            ImGui.TextDisabled("朝向听者=平直响应；固定朝前=声源偏离正前方即可听出高频变暗");
+
+            // HRTF
             ImGui.Spacing();
             ImGui.Text("HRTF");
             int interp = app.Interpolation;
@@ -274,6 +307,13 @@ namespace VirtualStereo.Desktop
                 app.LoadSofa(null);
                 _status = "已恢复内置 HRTF（CIPIC #124）";
             }
+        }
+
+        /// <summary>距离衰减 dB（2m 参考，反比）。</summary>
+        private static float AttenDb(float dist)
+        {
+            double g = 2.0 / Math.Max(0.3, dist);
+            return (float)(20.0 * Math.Log10(g));
         }
 
         // ───────────────────────── 音箱设置面板（分频指向性） ─────────────────────────
@@ -337,24 +377,7 @@ namespace VirtualStereo.Desktop
                 d.FillGradient(0f, 1f, 0.9f, 2f);
             }
 
-            // 朝向
-            ImGui.Spacing();
-            ImGui.Text("朝向（决定离轴角）");
-            int aim = d.Aim;
-            if (ImGui.RadioButton("朝向听者", ref aim, 0)) d.Aim = aim;
-            ImGui.SameLine();
-            if (ImGui.RadioButton("固定朝前", ref aim, 1)) d.Aim = aim;
-            ImGui.SameLine();
-            if (ImGui.RadioButton("手动", ref aim, 2)) d.Aim = aim;
-            if (aim == 2)
-            {
-                float aa = d.AimAz, ae = d.AimEl;
-                ImGui.SetNextItemWidth(260);
-                if (ImGui.SliderFloat("朝向 方位角", ref aa, -180f, 180f, "%.0f")) d.AimAz = aa;
-                ImGui.SetNextItemWidth(260);
-                if (ImGui.SliderFloat("朝向 仰角", ref ae, -90f, 90f, "%.0f")) d.AimEl = ae;
-            }
-            ImGui.TextDisabled("朝向听者=平直响应；固定朝前=声源偏离正前方即可听出高频变暗");
+            // 朝向在「空间模拟」面板（几何归几何，图案归图案）
 
             // 实时分带增益
             ImGui.Spacing();

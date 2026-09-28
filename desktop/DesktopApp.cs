@@ -17,6 +17,7 @@ namespace VirtualStereo.Desktop
         public volatile float PreGainDb = -6f;   // 模拟之前（输入电平）
         public volatile float PostGainDb = 0f;   // 模拟之后（输出电平）
         public volatile float AzL = -30f, AzR = 30f, ElL = 0f, ElR = 0f;
+        public volatile float DistL = 2f, DistR = 2f; // 音箱距离（米；2m 为参考，反比衰减）
         public volatile int Interpolation = 1; // 0 最近邻 / 1 双线性
         public volatile bool SilenceOriginal = true;
 
@@ -142,6 +143,14 @@ namespace VirtualStereo.Desktop
                 Directivity.Process(_dirStateL, _monoL, Chunk, rate, AzL, ElL);
                 Directivity.Process(_dirStateR, _monoR, Chunk, rate, AzR, ElR);
             }
+
+            // 音箱距离衰减：声学反比（2m 参考，距离每翻倍 -6dB）
+            float dl = 2f / Math.Max(0.3f, DistL);
+            float dr = 2f / Math.Max(0.3f, DistR);
+            if (dl != 1f)
+                for (int i = 0; i < Chunk; i++) _monoL[i] *= dl;
+            if (dr != 1f)
+                for (int i = 0; i < Chunk; i++) _monoR[i] *= dr;
 
             lock (_dspLock)
             {
