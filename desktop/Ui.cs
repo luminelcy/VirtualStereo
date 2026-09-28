@@ -6,6 +6,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Numerics;
 using ImGuiNET;
 using VirtualStereo.Capture;
 using VirtualStereo.Dsp;
@@ -312,6 +313,9 @@ namespace VirtualStereo.Desktop
             }
             ImGui.TextDisabled("朝向听者=平直响应；固定朝前=声源偏离正前方即可听出高频变暗");
 
+            // 摆位图示（俯视）
+            DrawSourceDiagram(app);
+
             // HRTF
             ImGui.Spacing();
             ImGui.Text("HRTF");
@@ -337,6 +341,126 @@ namespace VirtualStereo.Desktop
         {
             double g = 2.0 / Math.Max(0.3, dist);
             return (float)(20.0 * Math.Log10(g));
+        }
+
+        // ───────────────────────── 摆位图示（俯视） ─────────────────────────
+
+        private static uint Col(byte r, byte g, byte b) => 0xFF000000u | ((uint)r << 16) | ((uint)g << 8) | b;
+
+        /// <summary>俯视摆位图：听者居中（上方=正前），双音箱按方位/距离落点，箭头示朝向。</summary>
+        private static void DrawSourceDiagram(DesktopApp app)
+        {
+            ImGui.Spacing();
+            ImGui.Text("摆位图示（俯视：上方=正前，右方=右）");
+
+            const float size = 330f;
+            Vector2 origin = ImGui.GetCursorScreenPos();
+            ImGui.Dummy(new Vector2(size, size)); // 占位推进布局
+            var dl = ImGui.GetWindowDrawList();
+
+            Vector2 c = new Vector2(origin.X + size / 2f, origin.Y + size / 2f);
+            float half = size / 2f - 14f;
+            float maxD = Math.Max(3f, Math.Max(app.DistL, app.DistR) * 1.15f);
+            float px = half / maxD;
+
+            dl.AddRectFilled(origin, origin + new Vector2(size, size), Col(24, 24, 30));
+            dl.AddRect(origin, origin + new Vector2(size, size), Col(60, 60, 70));
+
+            // 距离环（2m 参考加亮）
+            foreach (float r in new[] { 2f, 5f, 10f, 20f })
+            {
+                if (r > maxD) continue;
+                uint ringCol = Math.Abs(r - 2f) < 0.01f ? Col(75, 85, 105) : Col(45, 48, 58);
+                dl.AddCircle(c, r * px, ringCol, 64);
+                dl.AddText(new Vector2(c.X + 5f, c.Y - r * px - 15f), Col(95, 100, 115), r.ToString("F0") + "m");
+            }
+
+            // 前 / 右 轴
+            dl.AddLine(c, new Vector2(c.X, c.Y - half), Col(70, 75, 90));
+            dl.AddText(new Vector2(c.X + 6f, c.Y - half - 2f), Col(115, 122, 140), "前");
+            dl.AddLine(c, new Vector2(c.X + half, c.Y), Col(60, 64, 78));
+            dl.AddText(new Vector2(c.X + half - 16f, c.Y + 4f), Col(115, 122, 140), "右");
+
+            // 听者（圆点 + 朝前小三角）
+            dl.AddCircleFilled(c, 7f, Col(230, 230, 235));
+            dl.AddTriangleFilled(
+                new Vector2(c.X, c.Y - 14f),
+                new Vector2(c.X - 6f, c.Y - 4f),
+                new Vector2(c.X + 6f, c.Y - 4f),
+                Col(230, 230, 235));
+            dl.AddText(new Vector2(c.X - 22f, c.Y + 9f), Col(180, 182, 190), "听者");
+
+            DrawSpeaker(dl, c, px, app, true);
+            DrawSpeaker(dl, c, px, app, false);
+        }
+
+        private static void DrawSpeaker(ImDrawListPtr dl, Vector2 c, float px, DesktopApp app, bool left)
+        {
+            float az = left ? app.AzL : app.AzR;
+            float el = left ? app.ElL : app.ElR;
+            float dist = left ? app.DistL : app.DistR;
+            int mode = left ? app.AimModeL : app.AimModeR;
+            float aimAz = left ? app.AimAzL : app.AimAzR;
+            float aimEl = left ? app.AimElL : app.AimElR;
+            uint col = left ? Col(80, 150, 255) : Col(255, 95, 90);
+
+            double a = az * Math.PI / 180.0;
+            var p = new Vector2(
+                c.X + (float)Math.Sin(a) * dist * px,
+                c.Y - (float)Math.Cos(a) * dist * px);
+
+            // 听者->音箱 连线
+            dl.AddLine(c, p, Col(55, 58, 68));
+
+            // 朝向箭头（顶视投影）
+            double ax, ay;
+            if (mode == 0)
+            {
+                float tx = c.X - p.X, ty = c.Y - p.Y;
+                double len = Math.Max(1e-3, Math.Sqrt(tx * tx + ty * ty));
+                ax = tx / len; ay = ty / len;
+            }
+            else if (mode == 1) { ax = 0; ay = -1; }
+            else
+            {
+                double aa = aimAz * Math.PI / 180.0;
+                ax = Math.Sin(aa); ay = -Math.Cos(aa);
+            }
+            var tip = new Vector2(p.X + (float)ax * 26f, p.Y + (float)ay * 26f);
+            dl.AddLine(p, tip, col, 2f);
+            var perp = new Vector2((float)-ay, (float)ax);
+            dl.AddTriangleFilled(
+                tip,
+                new Vector2(tip.X - (float)ax * 7f + perp.X * 4f, tip.Y - (float)ay * 7f + perp.Y * 4f),
+                new Vector2(tip.X - (float)ax * 7f - perp.X * 4f, tip.Y - (float)ay * 7f - perp.Y * 4f),
+                col);
+
+            // 点 + 标签（距离 / 离轴角）
+            dl.AddCircleFilled(p, 6f, col);
+            float theta = OffAxisDeg(az, el, mode, aimAz, aimEl);
+            string tag = (left ? "L " : "R ") + dist.ToString("F1", CultureInfo.InvariantCulture) + "m 离轴" + theta.ToString("F0");
+            dl.AddText(new Vector2(p.X + 9f, p.Y - 22f), col, tag);
+        }
+
+        /// <summary>离轴角（度）：音箱朝向 与 音箱->听者 方向 的夹角——指向性增益就是它决定的。</summary>
+        private static float OffAxisDeg(float srcAz, float srcEl, int aimMode, float aimAz, float aimEl)
+        {
+            double a = srcAz * Math.PI / 180.0, e = srcEl * Math.PI / 180.0;
+            double ce = Math.Cos(e);
+            double dx = Math.Sin(a) * ce, dy = Math.Sin(e), dz = Math.Cos(a) * ce; // 头->源
+            double ax, ay, az;
+            if (aimMode == 0) { ax = -dx; ay = -dy; az = -dz; }           // 朝向听者
+            else if (aimMode == 1) { ax = 0; ay = 0; az = 1; }             // 固定朝前
+            else
+            {
+                double aa = aimAz * Math.PI / 180.0, ee = aimEl * Math.PI / 180.0;
+                double cee = Math.Cos(ee);
+                ax = Math.Sin(aa) * cee; ay = Math.Sin(ee); az = Math.Cos(aa) * cee;
+            }
+            double cosT = ax * -dx + ay * -dy + az * -dz;
+            if (cosT > 1) cosT = 1;
+            if (cosT < -1) cosT = -1;
+            return (float)(Math.Acos(cosT) * 180.0 / Math.PI);
         }
 
         // ───────────────────────── 音箱设置面板（分频指向性） ─────────────────────────
