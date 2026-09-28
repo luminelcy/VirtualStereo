@@ -351,6 +351,20 @@ namespace VirtualStereo.Desktop
             if (ImGui.Checkbox("启用指向性（分频模拟）", ref en)) d.Enabled = en;
             ImGui.TextDisabled("信号链: 前置增益 -> 分频指向性 -> 空间模拟 -> 后置增益");
 
+            // 防呆：朝向听者（θ=0）或全向图案（w=0）时，任何设置都听不出效果
+            if (en)
+            {
+                bool flatAim = app.AimModeL == 0 && app.AimModeR == 0;
+                bool omni = true;
+                for (int i = 0; i < DirectivityProcessor.Bands; i++)
+                    if (d.W[i] > 0.001f) omni = false;
+                var warn = new System.Numerics.Vector4(1f, 0.75f, 0.2f, 1f);
+                if (flatAim)
+                    ImGui.TextColored(warn, "提示: 两源均朝向听者 -> 离轴角恒 0 -> 响应平直，听不出效果");
+                else if (omni)
+                    ImGui.TextColored(warn, "提示: 权重全为 0（全向）-> 无指向性效果");
+            }
+
             // 6 带 / 5 分频点
             ImGui.Spacing();
             ImGui.Text($"分频点（{DirectivityProcessor.Bands} 带，{DirectivityProcessor.Splits} 个分频点，最高 {DirectivityProcessor.MaxFreq:F0} Hz）");
@@ -408,10 +422,19 @@ namespace VirtualStereo.Desktop
             d.GainsAt(app.AzR, app.ElR, app.AimModeR, app.AimAzR, app.AimElR, _gR);
             ImGui.Text("当前分带增益  L: " + GainsText(_gL));
             ImGui.Text("              R: " + GainsText(_gR));
+            if (AllNearOne(_gL) && AllNearOne(_gR))
+                ImGui.TextDisabled("（增益全 1.00 = 当前配置无指向性效果）");
         }
 
         private static readonly float[] _gL = new float[DirectivityProcessor.Bands];
         private static readonly float[] _gR = new float[DirectivityProcessor.Bands];
+
+        private static bool AllNearOne(float[] g)
+        {
+            for (int i = 0; i < g.Length; i++)
+                if (Math.Abs(g[i] - 1f) > 0.005f) return false;
+            return true;
+        }
 
         private static string GainsText(float[] g)
         {

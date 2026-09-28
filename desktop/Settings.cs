@@ -22,12 +22,18 @@ namespace VirtualStereo.Desktop
         public float DistL { get; set; } = 2f;
         public float DistR { get; set; } = 2f;
         // 音箱朝向（每源独立；mode 0=朝向听者 1=固定朝前 2=手动）
-        public int AimModeL { get; set; } = 0;
-        public int AimModeR { get; set; } = 0;
+        // 默认 固定朝前：朝向听者时 θ=0 增益恒 1，指向性听不出效果（防呆）
+        public int AimModeL { get; set; } = 1;
+        public int AimModeR { get; set; } = 1;
         public float AimAzL { get; set; } = 0f;
         public float AimElL { get; set; } = 0f;
         public float AimAzR { get; set; } = 0f;
         public float AimElR { get; set; } = 0f;
+
+        // 旧版共享朝向（仅迁移用；null = 配置文件里没有）
+        public int? DirAim { get; set; } = null;
+        public float? DirAimAz { get; set; } = null;
+        public float? DirAimEl { get; set; } = null;
         public int Interpolation { get; set; } = 1;
         public string SofaPath { get; set; } = "";
 

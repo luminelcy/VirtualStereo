@@ -64,6 +64,13 @@ app.AimAzL = settings.AimAzL;
 app.AimElL = settings.AimElL;
 app.AimAzR = settings.AimAzR;
 app.AimElR = settings.AimElR;
+// 迁移：旧版共享朝向 -> 两源（防止升级后朝向静默重置成"朝向听者"=听不出效果）
+if (settings.DirAim.HasValue)
+{
+    app.AimModeL = app.AimModeR = settings.DirAim.Value;
+    if (settings.DirAimAz.HasValue) { app.AimAzL = app.AimAzR = settings.DirAimAz.Value; }
+    if (settings.DirAimEl.HasValue) { app.AimElL = app.AimElR = settings.DirAimEl.Value; }
+}
 Ui.Init(settings);
 
 void SaveSettings()
