@@ -70,6 +70,9 @@ namespace VirtualStereo.Desktop
         public float CaptureL => _capture?.RmsL ?? 0f;
         public float CaptureR => _capture?.RmsR ?? 0f;
         public bool Capturing => _capture != null;
+
+        /// <summary>音源 L/R 相关度（捕获输入侧；声相分析对照用，未捕获 = NaN）。</summary>
+        public float SourceCorrelation => _capture?.Correlation ?? float.NaN;
         public string PlayerError => _player?.LastError;
         public string SessionInfo => _capture?.SessionInfo ?? "";
 

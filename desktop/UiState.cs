@@ -22,9 +22,10 @@ namespace VirtualStereo.Desktop
         PostProcess = 6, // 后处理：输出 PEQ（校准之后、播放之前）
         Room = 7,        // 听音室：房间几何、一次反射、混响
         SpeakerCal = 8,  // 音箱校准：每箱扫频测到两耳（旁路 HRTF），源端补偿
+        Stereo = 9,      // 声相分析：李萨如、相关度、平衡、分带声相
         // ── 未来的家 ──
-        // Recording = 9,  // 录制与回放
-        // Compare = 10,   // A/B 对比
+        // Recording = 10, // 录制与回放
+        // Compare = 11,   // A/B 对比
     }
 
     internal static class UiState

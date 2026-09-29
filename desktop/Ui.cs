@@ -35,6 +35,7 @@ namespace VirtualStereo.Desktop
             new PanelDef { Id = Page.PostProcess, Title = "后处理", Subtitle = "输出 PEQ · 曲线", Draw = DrawPostPanel },
             new PanelDef { Id = Page.Room, Title = "听音室", Subtitle = "房间 · 反射 · 混响", Draw = DrawRoomPanel },
             new PanelDef { Id = Page.SpeakerCal, Title = "音箱校准", Subtitle = "每箱扫频 · 源端补偿", Draw = DrawSpeakerCalPanel },
+            new PanelDef { Id = Page.Stereo, Title = "声相分析", Subtitle = "李萨如 · 相关 · 平衡", Draw = DrawStereoPanel },
         };
 
         private struct Row
@@ -1374,6 +1375,205 @@ namespace VirtualStereo.Desktop
             ImGui.Text("每箱频响（两耳 dB 平均；纵 -36..+18 dB；实测=蓝/红，EQ=绿，补偿后预期=白）");
             DrawCalBox(cal.GridHz, cal.DispSrcL, cal.CorrSrcL, cal.PredSrcL, Col(80, 150, 255), "L箱");
             DrawCalBox(cal.GridHz, cal.DispSrcR, cal.CorrSrcR, cal.PredSrcR, Col(255, 95, 90), "R箱");
+        }
+
+        // ───────────────────────── 声相分析面板 ─────────────────────────
+
+        private static float[] _gonL = new float[4096];
+        private static float[] _gonR = new float[4096];
+        private static float[] _bandBal = new float[11];
+        private static long _nextPanAt;
+
+        // 分带边界（10 带，40Hz 起——2048 点窗的频率分辨率 ~23Hz）
+        private static readonly float[] PanEdges =
+            { 40, 80, 160, 315, 630, 1250, 2500, 5000, 10000, 16000, 20000 };
+
+        private static void DrawStereoPanel(DesktopApp app)
+        {
+            var mon = app.Monitor;
+            mon.Snapshot(_gonL, _gonR);
+
+            ImGui.Text("声相分析（两耳信号：X=左耳 / Y=右耳）");
+            ImGui.TextDisabled("李萨如图：右上对角=同相(中置)  左上对角=反相  越圆越宽 越线越窄");
+            DrawGoniBox();
+
+            // 统计量（4096 样本 ≈ 85ms 窗）
+            int n = _gonL.Length;
+            double sumLR = 0, sL = 0, sR = 0, sM = 0, sS = 0;
+            for (int i = 0; i < n; i++)
+            {
+                float l = _gonL[i], r = _gonR[i];
+                sumLR += (double)l * r;
+                sL += (double)l * l;
+                sR += (double)r * r;
+                float m = 0.5f * (l + r), s = 0.5f * (l - r);
+                sM += (double)m * m;
+                sS += (double)s * s;
+            }
+            bool silent = sL + sR < 1e-10;
+            double rmsL = Math.Sqrt(sL / n), rmsR = Math.Sqrt(sR / n);
+            double denom = Math.Sqrt(sL * sR);
+            float corr = denom > 1e-12 ? (float)(sumLR / denom) : 0f;
+            float balance = rmsL + rmsR > 1e-9 ? (float)((rmsR - rmsL) / (rmsR + rmsL)) : 0f;
+            double width = Math.Sqrt(sM) > 1e-9 ? Math.Sqrt(sS / sM) : 99.0;
+
+            ImGui.Spacing();
+            string corrNote = silent ? "（静音）"
+                : corr >= 0.5f ? "同相为主，中置感强"
+                : corr >= 0.1f ? "正常立体声"
+                : corr >= -0.1f ? "很宽 / 近去相关"
+                : "含反相成分：折叠单声道会抵消";
+            ImGui.Text("相关度");
+            ImGui.SameLine();
+            DrawCenterBar(corr, 240, corr >= 0f ? Col(110, 200, 120) : Col(230, 120, 90));
+            ImGui.SameLine();
+            ImGui.Text($"{corr:F2}  {corrNote}");
+
+            ImGui.Text("声像平衡");
+            ImGui.SameLine();
+            DrawCenterBar(balance, 240, Col(120, 170, 240));
+            ImGui.SameLine();
+            string balNote = silent ? "（静音）" : balance > 0.12f ? "偏右" : balance < -0.12f ? "偏左" : "居中";
+            ImGui.Text($"{balance:F2}（R−L）{balNote}");
+
+            ImGui.Text("立体声宽度");
+            ImGui.SameLine();
+            DrawLeftBar((float)Math.Min(width, 2.0) / 2f, 240, Col(170, 140, 240));
+            ImGui.SameLine();
+            ImGui.Text(width >= 99.0 ? ">200%（强反相）" : $"{width * 100:F0}%（0=单声道）");
+
+            if (app.Capturing && !float.IsNaN(app.SourceCorrelation))
+                ImGui.TextDisabled($"对照：音源 L/R 相关 {app.SourceCorrelation:F2}（捕获输入侧）");
+            ImGui.TextDisabled("双耳渲染后两耳天然去相关是正常的；要看出处理前后差异看上面的音源对照");
+
+            // 分带声相：每带 R−L 平衡（100ms 节流，复用分析面板的频谱管线）
+            ImGui.Spacing();
+            ImGui.Text("声相随频率（每带平衡：中线=居中，红=偏右 / 蓝=偏左）");
+            if (Environment.TickCount64 >= _nextPanAt)
+            {
+                _nextPanAt = Environment.TickCount64 + 100;
+                mon.Snapshot(_wL, _wR);
+                ComputeSpectrum(_wL, _specL);
+                ComputeSpectrum(_wR, _specR);
+                float binHz = mon.Rate / (float)SpecN;
+                for (int b = 0; b < PanEdges.Length - 1; b++)
+                {
+                    int k0 = Math.Clamp((int)(PanEdges[b] / binHz), 1, _specL.Length - 1);
+                    int k1 = Math.Clamp((int)(PanEdges[b + 1] / binHz) + 1, k0 + 1, _specL.Length);
+                    double aL = 0, aR = 0;
+                    int c = 0;
+                    for (int k = k0; k < k1; k++) { aL += _specL[k]; aR += _specR[k]; c++; }
+                    float db = c > 0 ? (float)((aR - aL) / c) : 0f;
+                    // 平衡 = (Pr-Pl)/(Pr+Pl)，r=10^(db/10) → tanh(ln(r)/2)
+                    _bandBal[b] = (float)Math.Tanh(db * 0.11512925);
+                }
+            }
+            DrawBandPanBox();
+        }
+
+        private static void DrawGoniBox()
+        {
+            float w = Math.Min(560f, Math.Max(320f, ImGui.GetContentRegionAvail().X));
+            const float h = 320f;
+            Vector2 origin = ImGui.GetCursorScreenPos();
+            ImGui.Dummy(new Vector2(w, h));
+            var dl = ImGui.GetWindowDrawList();
+            dl.AddRectFilled(origin, origin + new Vector2(w, h), Col(24, 24, 30));
+            dl.AddRect(origin, origin + new Vector2(w, h), Col(60, 60, 70));
+
+            float cx = origin.X + w * 0.5f, cy = origin.Y + h * 0.5f;
+            dl.AddLine(new Vector2(origin.X, cy), new Vector2(origin.X + w, cy), Col(45, 48, 58));
+            dl.AddLine(new Vector2(cx, origin.Y), new Vector2(cx, origin.Y + h), Col(45, 48, 58));
+            // 对角线：左上->右下 = 反相；左下->右上 = 同相(中置)
+            dl.AddLine(new Vector2(origin.X, origin.Y), new Vector2(origin.X + w, origin.Y + h), Col(58, 62, 74));
+            dl.AddLine(new Vector2(origin.X, origin.Y + h), new Vector2(origin.X + w, origin.Y), Col(58, 62, 74));
+
+            // 自动缩放到峰值（下限 0.1，安静也有形状）
+            float peak = 0.1f;
+            for (int i = 0; i < _gonL.Length; i += 4)
+            {
+                float a = Math.Abs(_gonL[i]);
+                if (a > peak) peak = a;
+                float b2 = Math.Abs(_gonR[i]);
+                if (b2 > peak) peak = b2;
+            }
+            float scale = Math.Min(w, h) * 0.47f / peak;
+            uint dot = 0xA0D8E0F0; // 半透明亮点：出现密度即天然持久
+            for (int i = 0; i < _gonL.Length; i++)
+            {
+                float x = cx + _gonL[i] * scale;
+                float y = cy - _gonR[i] * scale;
+                dl.AddRectFilled(new Vector2(x, y), new Vector2(x + 1, y + 1), dot);
+            }
+            dl.AddText(new Vector2(origin.X + 6, origin.Y + 4), Col(120, 125, 140), "X=左耳  Y=右耳");
+            dl.AddText(new Vector2(origin.X + w - 132, origin.Y + 4), Col(120, 125, 140), "右上对角=同相中置");
+            dl.AddText(new Vector2(origin.X + 6, origin.Y + h - 16), Col(120, 125, 140), "圆=宽  线=窄  横带=反相");
+        }
+
+        /// <summary>中心零点横条（-1..+1）。画完调用方再 SameLine 放数值。</summary>
+        private static void DrawCenterBar(float v, float w, uint col)
+        {
+            Vector2 o = ImGui.GetCursorScreenPos();
+            const float h = 16f;
+            ImGui.Dummy(new Vector2(w, h));
+            var dl = ImGui.GetWindowDrawList();
+            dl.AddRectFilled(o, o + new Vector2(w, h), Col(30, 32, 40));
+            float cx = o.X + w * 0.5f;
+            dl.AddLine(new Vector2(cx, o.Y + 1), new Vector2(cx, o.Y + h - 1), Col(70, 75, 90));
+            v = Math.Clamp(v, -1f, 1f);
+            float x0 = Math.Min(cx, cx + v * w * 0.5f);
+            float x1 = Math.Max(cx, cx + v * w * 0.5f);
+            dl.AddRectFilled(new Vector2(x0, o.Y + 2), new Vector2(x1, o.Y + h - 2), col);
+        }
+
+        /// <summary>左起横条（0..1）。</summary>
+        private static void DrawLeftBar(float v01, float w, uint col)
+        {
+            Vector2 o = ImGui.GetCursorScreenPos();
+            const float h = 16f;
+            ImGui.Dummy(new Vector2(w, h));
+            var dl = ImGui.GetWindowDrawList();
+            dl.AddRectFilled(o, o + new Vector2(w, h), Col(30, 32, 40));
+            float fill = Math.Clamp(v01, 0f, 1f) * w;
+            dl.AddRectFilled(new Vector2(o.X + 1, o.Y + 2), new Vector2(o.X + fill - 1, o.Y + h - 2), col);
+        }
+
+        private static void DrawBandPanBox()
+        {
+            int bands = PanEdges.Length - 1;
+            float w = Math.Min(560f, Math.Max(360f, ImGui.GetContentRegionAvail().X));
+            const float rowH = 22f;
+            float h = bands * rowH + 28f;
+            Vector2 origin = ImGui.GetCursorScreenPos();
+            ImGui.Dummy(new Vector2(w, h));
+            var dl = ImGui.GetWindowDrawList();
+            dl.AddRectFilled(origin, origin + new Vector2(w, h), Col(24, 24, 30));
+            dl.AddRect(origin, origin + new Vector2(w, h), Col(60, 60, 70));
+
+            float labelW = 64f;
+            float barX0 = origin.X + labelW;
+            float barW = w - labelW - 56f;
+            float cx = barX0 + barW * 0.5f;
+            dl.AddLine(new Vector2(cx, origin.Y + 22), new Vector2(cx, origin.Y + h - 4), Col(70, 75, 90));
+            dl.AddText(new Vector2(origin.X + 6, origin.Y + 5), Col(120, 125, 140), "Hz");
+            dl.AddText(new Vector2(barX0, origin.Y + 5), Col(120, 125, 140), "左 <- 平衡 -> 右");
+
+            for (int b = 0; b < bands; b++)
+            {
+                float y = origin.Y + 24 + b * rowH;
+                float f0 = PanEdges[b];
+                string lbl = f0 >= 1000 ? (f0 / 1000).ToString("0.#") + "k" : f0.ToString("0");
+                dl.AddText(new Vector2(origin.X + 6, y + 3), Col(95, 100, 115), lbl);
+
+                float v = _bandBal[b];
+                float x0 = Math.Min(cx, cx + v * barW * 0.5f);
+                float x1 = Math.Max(cx, cx + v * barW * 0.5f);
+                uint col = v >= 0f ? Col(255, 95, 90) : Col(80, 150, 255);
+                dl.AddRectFilled(new Vector2(x0, y + 4), new Vector2(x1, y + rowH - 5), col);
+
+                string vs = (v >= 0f ? "+" : "") + (v * 100f).ToString("F0") + "%";
+                dl.AddText(new Vector2(origin.X + w - 46, y + 3), Col(120, 125, 140), vs);
+            }
         }
 
         // ───────────────────────── 共用 ─────────────────────────
