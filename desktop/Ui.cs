@@ -909,6 +909,9 @@ namespace VirtualStereo.Desktop
                 spk.Redesign();
                 spk.DesignDirty = false;
             }
+
+            // 声像时间线（100ms 节流；切走面板也继续积累，回来能看到完整历史）
+            UpdatePanTimeline(app);
         }
 
         private static void DrawCalibrationPanel(DesktopApp app)
@@ -1471,28 +1474,13 @@ namespace VirtualStereo.Desktop
             mon.Snapshot(_gonL, _gonR);
 
             ImGui.Text("声相分析（两耳信号）");
-            ImGui.TextDisabled("半圆声相图：中轴=同相(中置)  贴底边=反相  半径=幅度（自动缩放）");
+            ImGui.TextDisabled("李萨如图（中间/侧边）：纵 M=同相中置  横 S=侧边宽度  对角=单边 L/R");
             DrawGoniBox();
 
             // 统计量（4096 样本 ≈ 85ms 窗）
             int n = _gonL.Length;
-            double sumLR = 0, sL = 0, sR = 0, sM = 0, sS = 0;
-            for (int i = 0; i < n; i++)
-            {
-                float l = _gonL[i], r = _gonR[i];
-                sumLR += (double)l * r;
-                sL += (double)l * l;
-                sR += (double)r * r;
-                float m = 0.5f * (l + r), s = 0.5f * (l - r);
-                sM += (double)m * m;
-                sS += (double)s * s;
-            }
-            bool silent = sL + sR < 1e-10;
-            double rmsL = Math.Sqrt(sL / n), rmsR = Math.Sqrt(sR / n);
-            double denom = Math.Sqrt(sL * sR);
-            float corr = denom > 1e-12 ? (float)(sumLR / denom) : 0f;
-            float balance = rmsL + rmsR > 1e-9 ? (float)((rmsR - rmsL) / (rmsR + rmsL)) : 0f;
-            double width = Math.Sqrt(sM) > 1e-9 ? Math.Sqrt(sS / sM) : 99.0;
+            ComputePanStats(_gonL, _gonR, n, out float corr, out float balance,
+                out float width, out bool silent);
 
             ImGui.Spacing();
             string corrNote = silent ? "（静音）"
@@ -1515,13 +1503,19 @@ namespace VirtualStereo.Desktop
 
             ImGui.Text("立体声宽度");
             ImGui.SameLine();
-            DrawLeftBar((float)Math.Min(width, 2.0) / 2f, 240, Col(170, 140, 240));
+            DrawLeftBar(Math.Min(width, 2f) / 2f, 240, Col(170, 140, 240));
             ImGui.SameLine();
-            ImGui.Text(width >= 99.0 ? ">200%（强反相）" : $"{width * 100:F0}%（0=单声道）");
+            ImGui.Text(width >= 99f ? ">200%（强反相）" : $"{width * 100:F0}%（0=单声道）");
 
             if (app.Capturing && !float.IsNaN(app.SourceCorrelation))
                 ImGui.TextDisabled($"对照：音源 L/R 相关 {app.SourceCorrelation:F2}（捕获输入侧）");
             ImGui.TextDisabled("双耳渲染后两耳天然去相关是正常的；要看出处理前后差异看上面的音源对照");
+
+            // 声像分析：位置与宽度随时间
+            ImGui.Spacing();
+            ImGui.Text("声像分析：位置与宽度随时间（滚动 30 秒）");
+            ImGui.TextDisabled("白线=声像中心（平衡），色带=声像宽度（±半宽）；上=偏右 / 下=偏左");
+            DrawPanTimelineBox();
 
             // 分带声相：每带 R−L 平衡（100ms 节流，复用分析面板的频谱管线）
             ImGui.Spacing();
@@ -1548,65 +1542,146 @@ namespace VirtualStereo.Desktop
             DrawBandPanBox();
         }
 
+        /// <summary>声像统计：相关度 / 位置(右正) / 宽度(S/M 比，99=强反相哨兵)。</summary>
+        private static void ComputePanStats(float[] l, float[] r, int n,
+            out float corr, out float pos, out float width, out bool silent)
+        {
+            double sumLR = 0, sL = 0, sR = 0, sM = 0, sS = 0;
+            for (int i = 0; i < n; i++)
+            {
+                double a = l[i], b = r[i];
+                sumLR += a * b;
+                sL += a * a;
+                sR += b * b;
+                double m = 0.5 * (a + b), s = 0.5 * (a - b);
+                sM += m * m;
+                sS += s * s;
+            }
+            silent = sL + sR < 1e-10;
+            double rmsL = Math.Sqrt(sL / n), rmsR = Math.Sqrt(sR / n);
+            double denom = Math.Sqrt(sL * sR);
+            corr = denom > 1e-12 ? (float)(sumLR / denom) : 0f;
+            pos = rmsL + rmsR > 1e-9 ? (float)((rmsR - rmsL) / (rmsR + rmsL)) : 0f;
+            width = Math.Sqrt(sM) > 1e-9 ? (float)Math.Sqrt(sS / sM) : 99f;
+        }
+
         private static void DrawGoniBox()
         {
             float w = Math.Min(560f, Math.Max(320f, ImGui.GetContentRegionAvail().X));
-            const float h = 300f;
+            const float h = 320f;
             Vector2 origin = ImGui.GetCursorScreenPos();
             ImGui.Dummy(new Vector2(w, h));
             var dl = ImGui.GetWindowDrawList();
+            dl.AddRectFilled(origin, origin + new Vector2(w, h), Col(24, 24, 30));
+            dl.AddRect(origin, origin + new Vector2(w, h), Col(60, 60, 70));
 
-            float cx = origin.X + w * 0.5f;
-            float cy = origin.Y + h - 8f;            // 平底边
-            float R = Math.Min(w * 0.5f - 10f, h - 12f);
+            float cx = origin.X + w * 0.5f, cy = origin.Y + h * 0.5f;
+            // 两轴：纵 M（中间/同相）横 S（侧边/宽度）
+            dl.AddLine(new Vector2(origin.X, cy), new Vector2(origin.X + w, cy), Col(45, 48, 58));
+            dl.AddLine(new Vector2(cx, origin.Y), new Vector2(cx, origin.Y + h), Col(45, 48, 58));
+            // 对角 = 单边内容：左上<-右下 为纯 L（S 负 M 正在左上），纯 R 在右上
+            dl.AddLine(new Vector2(origin.X, origin.Y), new Vector2(origin.X + w, origin.Y + h), Col(58, 62, 74));
+            dl.AddLine(new Vector2(origin.X, origin.Y + h), new Vector2(origin.X + w, origin.Y), Col(58, 62, 74));
 
-            // 半圆盘（平底在下）+ 边缘线
-            dl.PathClear();
-            dl.PathLineTo(new Vector2(cx - R, cy));
-            dl.PathArcTo(new Vector2(cx, cy), R, (float)Math.PI, 2f * (float)Math.PI, 72);
-            dl.PathFillConvex(Col(24, 24, 30));
-            dl.PathClear();
-            dl.PathLineTo(new Vector2(cx - R, cy));
-            dl.PathArcTo(new Vector2(cx, cy), R, (float)Math.PI, 2f * (float)Math.PI, 72);
-            dl.PathLineTo(new Vector2(cx + R, cy));
-            dl.PathStroke(Col(60, 60, 70), ImDrawFlags.Closed, 1.2f);
-
-            // 指引：中轴、±45° 辐条、内弧
-            dl.AddLine(new Vector2(cx, cy), new Vector2(cx, cy - R), Col(50, 54, 64));
-            float d45 = R * 0.7071f;
-            dl.AddLine(new Vector2(cx, cy), new Vector2(cx - d45, cy - d45), Col(50, 54, 64));
-            dl.AddLine(new Vector2(cx, cy), new Vector2(cx + d45, cy - d45), Col(50, 54, 64));
-            dl.PathClear();
-            dl.PathArcTo(new Vector2(cx, cy), R * 0.55f, (float)Math.PI, 2f * (float)Math.PI, 48);
-            dl.PathStroke(Col(50, 54, 64), ImDrawFlags.None, 1f);
-
-            // 极坐标散点：角度=瞬时声相 atan2(R−L, R+L)，半径=幅度（峰值自动缩放，裁进盘内）
+            // 峰值自动缩放（M、S 同尺度）
             float peak = 0.1f;
             for (int i = 0; i < _gonL.Length; i += 4)
             {
-                float m = (float)Math.Sqrt((double)_gonL[i] * _gonL[i] + (double)_gonR[i] * _gonR[i]);
-                if (m > peak) peak = m;
+                float m = _gonL[i] + _gonR[i];
+                float s = _gonR[i] - _gonL[i];
+                float am = Math.Abs(m);
+                if (am > peak) peak = am;
+                float asd = Math.Abs(s);
+                if (asd > peak) peak = asd;
             }
-            float scale = (R - 4f) / peak;
-            const float clampA = 1.5533f; // 89°：反相内容堆在底边两侧（贴边=反相提示）
-            uint dot = 0x90FFC44A;        // 琥珀色，重叠处自然增亮
+            float scale = Math.Min(w, h) * 0.47f / peak;
+            uint dot = 0x90FFC44A; // 琥珀色散点，重叠自然增亮
             for (int i = 0; i < _gonL.Length; i++)
             {
-                float l = _gonL[i], r = _gonR[i];
-                float theta = (float)Math.Atan2(r - l, r + l);
-                if (theta > clampA) theta = clampA;
-                else if (theta < -clampA) theta = -clampA;
-                float mag = (float)Math.Sqrt((double)l * l + (double)r * r) * scale;
-                if (mag > R - 2f) mag = R - 2f;
-                float x = cx + mag * (float)Math.Sin(theta);
-                float y = cy - mag * (float)Math.Cos(theta);
+                float m = _gonL[i] + _gonR[i];
+                float s = _gonR[i] - _gonL[i];
+                float x = cx + s * scale;
+                float y = cy - m * scale;
                 dl.AddRectFilled(new Vector2(x, y), new Vector2(x + 1, y + 1), dot);
             }
 
-            dl.AddText(new Vector2(origin.X + 8, origin.Y + 6), Col(150, 155, 170), "L");
-            dl.AddText(new Vector2(origin.X + w - 16, origin.Y + 6), Col(150, 155, 170), "R");
-            dl.AddText(new Vector2(cx - 92, origin.Y + h - 17), Col(120, 125, 140),
-                "中轴=同相  贴底边=反相  越外越响");
+            dl.AddText(new Vector2(origin.X + 6, origin.Y + 4), Col(150, 155, 170), "M 中间 = L+R");
+            dl.AddText(new Vector2(origin.X + w - 104, origin.Y + 4), Col(150, 155, 170), "S 侧边 = R−L");
+            dl.AddText(new Vector2(origin.X + 6, origin.Y + h - 16), Col(120, 125, 140),
+                "竖=单声道  横=反相  对角=单边（左上=纯L  右上=纯R）");
+        }
+
+        // ── 声像时间线（100ms × 300 = 30s，主循环泵推进）──
+        private const int PanN = 300;
+        private static readonly float[] _panPos = new float[PanN];
+        private static readonly float[] _panW = new float[PanN];
+        private static int _panHead;
+        private static long _panNextAt;
+
+        private static void UpdatePanTimeline(DesktopApp app)
+        {
+            if (Environment.TickCount64 < _panNextAt) return;
+            _panNextAt = Environment.TickCount64 + 100;
+            app.Monitor.Snapshot(_gonL, _gonR);
+            ComputePanStats(_gonL, _gonR, _gonL.Length,
+                out _, out float pos, out float width, out bool silent);
+            _panPos[_panHead] = silent ? 0f : Math.Clamp(pos, -1f, 1f);
+            _panW[_panHead] = silent ? 0f : Math.Clamp(width, 0f, 2f);
+            _panHead = (_panHead + 1) % PanN;
+        }
+
+        private static void DrawPanTimelineBox()
+        {
+            float w = Math.Min(560f, Math.Max(360f, ImGui.GetContentRegionAvail().X));
+            const float h = 170f;
+            Vector2 o = ImGui.GetCursorScreenPos();
+            ImGui.Dummy(new Vector2(w, h));
+            var dl = ImGui.GetWindowDrawList();
+            dl.AddRectFilled(o, o + new Vector2(w, h), Col(24, 24, 30));
+            dl.AddRect(o, o + new Vector2(w, h), Col(60, 60, 70));
+
+            float padL = 44f;
+            float x0 = o.X + padL, x1 = o.X + w - 4f;
+            float yTop = o.Y + 8f, yBot = o.Y + h - 18f;
+            float Y(float p) => yTop + (1f - Math.Clamp(p, -1f, 1f)) * 0.5f * (yBot - yTop);
+
+            // 参考线 + 左侧标签
+            foreach (int t in new[] { 1, 0, -1 })
+            {
+                float y = Y(t);
+                dl.AddLine(new Vector2(x0, y), new Vector2(x1, y),
+                    t == 0 ? Col(70, 75, 90) : Col(45, 48, 58));
+                string lbl = t > 0 ? "偏右" : t == 0 ? "居中" : "偏左";
+                dl.AddText(new Vector2(o.X + 6, y - 6), Col(95, 100, 115), lbl);
+            }
+
+            // 时间带（逐列竖条拼合，规避非凸多边形填充）
+            float colW = (x1 - x0) / PanN + 1.2f;
+            for (int i = 0; i < PanN; i++)
+            {
+                int idx = (_panHead + i) % PanN;
+                float x = x0 + (x1 - x0) * i / (PanN - 1);
+                float c = _panPos[idx];
+                float half = Math.Clamp(_panW[idx] * 0.5f, 0.02f, 1f);
+                float yT = Y(c + half), yB = Y(c - half);
+                dl.AddRectFilled(new Vector2(x, yT), new Vector2(x + colW, yB), 0x60FFC44A);
+            }
+
+            // 中心折线
+            Vector2 prev = default;
+            for (int i = 0; i < PanN; i++)
+            {
+                int idx = (_panHead + i) % PanN;
+                var p = new Vector2(
+                    x0 + (x1 - x0) * i / (PanN - 1),
+                    Y(_panPos[idx]));
+                if (i > 0) dl.AddLine(prev, p, Col(235, 235, 240), 1.4f);
+                prev = p;
+            }
+
+            dl.AddLine(new Vector2(x1, yTop), new Vector2(x1, yBot), Col(95, 100, 115));
+            dl.AddText(new Vector2(o.X + 4, o.Y + h - 15), Col(120, 125, 140), "30s 前");
+            dl.AddText(new Vector2(x1 - 32, o.Y + h - 15), Col(120, 125, 140), "现在");
         }
 
         /// <summary>中心零点横条（-1..+1）。画完调用方再 SameLine 放数值。</summary>
