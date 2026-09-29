@@ -1,6 +1,10 @@
-// 音箱指向性（频率相关）：N 分频带 + 加权偶极子图案，公式与 Steam Audio 一致：
-//   g(θ) = |(1−w) + w·cosθ|^p          （directivity.cpp: evaluate()）
-//   w=dipoleWeight: 0=全向 0.5=心形 1=8字；p=dipolePower: 锐度
+// 音箱指向性（频率相关）：N 分频带 + 图案，两个图案族可选：
+//   锥形族（默认，音箱用）：g = (1−w) + w·((1+cosθ)/2)^p —— 单调向前，
+//     背面压到 (1−w) 的底板，**永不回升**（现实音箱的锥形指向）
+//   偶极子系（麦用，Steam Audio 公式）：g = |(1−w) + w·cosθ|^p
+//   w: 0=全向；p: 锐度/束宽
+// 注意：偶极子系 w>0.5 时括号在 ~90° 后过零、绝对值折回上升
+//   （w=0.9 时 96.4° 归零、180° 回到 −4.4dB）——麦的超心形/8字是这形状，音箱不是。
 //
 // 6 带 × 5 分频点（默认 125/350/1k/3k/10k，对数分布，最高可到 16k）：
 // 真实喇叭低频绕射强、高频聚拢，宽带单值图案表达不了——每带独立 (w, p)
@@ -51,6 +55,9 @@ namespace VirtualStereo.Dsp
         public const float MaxFreq = 16000f;
 
         public volatile bool Enabled;
+
+        // 图案族：0=锥形（默认，音箱） 1=偶极子系（心形/8字，麦）
+        public volatile int Family;
 
         // 分频点（对数分布默认）与每带图案参数（元素级并发读写为良性竞争）
         public readonly float[] Freqs = { 125f, 350f, 1000f, 3000f, 10000f };
@@ -108,13 +115,15 @@ namespace VirtualStereo.Dsp
             }
 
             // 行：每角度取图案增益（一次），列内做分带复数递推。
-            // 自身坐标系：正面固定 +Z，角度即离轴角——不随摆放朝向变
+            // 自身坐标系：θ 即离轴角本身（正面=0°）。不走 GainsInto 的方向换算——
+            // 它按"声源->听者"（−dir）取角，直接传角度会把图镜像（φ 映到 180°−φ）
             float angStep = 360f / (rows - 1);
             for (int r = 0; r < rows; r++)
             {
                 float ang = 180f - r * angStep;
-                GainsInto(horizontal ? ang : 0f, horizontal ? 0f : ang,
-                    (int)AimMode.HeadForward, 0f, 0f, _gProbe);
+                float cosT = (float)Math.Cos(ang * Math.PI / 180.0);
+                for (int i = 0; i < Bands; i++)
+                    _gProbe[i] = Pattern(W[i], P[i], cosT);
 
                 for (int c = 0; c < cols; c++)
                 {
@@ -213,13 +222,22 @@ namespace VirtualStereo.Dsp
                 dst[i] = Pattern(W[i], P[i], cosT);
         }
 
-        /// <summary>Steam Audio 加权偶极子：| (1−w) + w·cosθ | ^ p，w=0 时恒为 1。</summary>
-        private static float Pattern(float w, float p, float cosTheta)
+        /// <summary>图案（Family 选择）：
+        /// 锥形族 g = (1−w) + w·((1+cosθ)/2)^p——单调、背面= (1−w) 底板、不回升（音箱）；
+        /// 偶极子系 g = |(1−w)+w·cosθ|^p（Steam Audio 加权偶极子，麦式——w>0.5 时 90° 后回升）。
+        /// w=0 恒为 1（全向）。</summary>
+        private float Pattern(float w, float p, float cosTheta)
         {
             if (w <= 0f) return 1f;
-            float base_ = (1f - w) + w * cosTheta;
-            float v = base_ < 0f ? -base_ : base_;
-            return (float)Math.Pow(v, p);
+            if (Family == 1)
+            {
+                float base_ = (1f - w) + w * cosTheta;
+                float v = base_ < 0f ? -base_ : base_;
+                return (float)Math.Pow(v, p);
+            }
+            // 锥形：全向与 cos^p 半角瓣的幅度混合——两项都非负且单调，无绝对值折回
+            float lobe = (float)Math.Pow((1f + cosTheta) * 0.5, p);
+            return (1f - w) + w * lobe;
         }
 
         private static void GetAim(int aimMode, float aimAz, float aimEl,

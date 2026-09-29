@@ -57,6 +57,7 @@ app.DistL = settings.DistL;
 app.DistR = settings.DistR;
 app.Interpolation = settings.Interpolation;
 app.Directivity.Enabled = settings.DirEnabled;
+app.Directivity.Family = settings.DirFamily;
 if (settings.DirFreqs != null && settings.DirFreqs.Length == DirectivityProcessor.Splits)
     for (int i = 0; i < DirectivityProcessor.Splits; i++) app.Directivity.Freqs[i] = settings.DirFreqs[i];
 if (settings.DirW != null && settings.DirW.Length == DirectivityProcessor.Bands)
@@ -143,6 +144,7 @@ void SaveSettings()
     settings.Interpolation = app.Interpolation;
     settings.SofaPath = Ui.CurrentSofaPath;
     settings.DirEnabled = app.Directivity.Enabled;
+    settings.DirFamily = app.Directivity.Family;
     settings.DirFreqs = (float[])app.Directivity.Freqs.Clone();
     settings.DirW = (float[])app.Directivity.W.Clone();
     settings.DirP = (float[])app.Directivity.P.Clone();

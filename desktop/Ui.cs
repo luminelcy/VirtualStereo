@@ -641,7 +641,13 @@ namespace VirtualStereo.Desktop
 
             // 分带图案（带名 = 当前分频点算出的频段）
             ImGui.Spacing();
-            ImGui.Text("分带图案  权重: 0=全向 0.5=心形 1=8字    锐度: 越大越窄");
+            int fam = d.Family;
+            if (ImGui.RadioButton("锥形（音箱，推荐）##fam", ref fam, 0)) d.Family = 0;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("偶极子系（心形/8字，麦）##fam", ref fam, 1)) d.Family = 1;
+            ImGui.Text(d.Family == 0
+                ? "分带图案（锥形族）  权重: 0=全向 -> 1=纯锥（背面压到 1−w 底板）   锐度: 越大锥越窄"
+                : "分带图案（偶极子系）  权重: 0=全向 0.5=心形 1=8字   锐度: 越大越窄（w>0.5 时 90° 后会回升）");
             for (int i = 0; i < DirectivityProcessor.Bands; i++)
                 BandRow(BandLabel(d, i), d.W, d.P, i);
 
@@ -667,7 +673,7 @@ namespace VirtualStereo.Desktop
                 for (int i = 0; i < DirectivityProcessor.Bands; i++) { d.W[i] = 0f; d.P[i] = 1f; }
             }
             ImGui.SameLine();
-            if (ImGui.Button("预设 均匀心形"))
+            if (ImGui.Button("预设 中等指向"))
             {
                 for (int i = 0; i < DirectivityProcessor.Bands; i++) { d.W[i] = 0.5f; d.P[i] = 1f; }
             }

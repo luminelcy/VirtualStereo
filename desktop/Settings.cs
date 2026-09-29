@@ -94,6 +94,7 @@ namespace VirtualStereo.Desktop
 
         // 音箱指向性（分频）：5 分频点 / 6 带权重 / 6 带锐度
         public bool DirEnabled { get; set; } = false;
+        public int DirFamily { get; set; } = 0; // 图案族：0=锥形（音箱默认） 1=偶极子系（麦）
         public float[] DirFreqs { get; set; } = { 125f, 350f, 1000f, 3000f, 10000f };
         public float[] DirW { get; set; } = { 0f, 0f, 0f, 0f, 0f, 0f };
         public float[] DirP { get; set; } = { 1f, 1f, 1f, 1f, 1f, 1f };
