@@ -1393,8 +1393,8 @@ namespace VirtualStereo.Desktop
             var mon = app.Monitor;
             mon.Snapshot(_gonL, _gonR);
 
-            ImGui.Text("声相分析（两耳信号：X=左耳 / Y=右耳）");
-            ImGui.TextDisabled("李萨如图：右上对角=同相(中置)  左上对角=反相  越圆越宽 越线越窄");
+            ImGui.Text("声相分析（两耳信号）");
+            ImGui.TextDisabled("半圆声相图：中轴=同相(中置)  贴底边=反相  半径=幅度（自动缩放）");
             DrawGoniBox();
 
             // 统计量（4096 样本 ≈ 85ms 窗）
@@ -1474,40 +1474,62 @@ namespace VirtualStereo.Desktop
         private static void DrawGoniBox()
         {
             float w = Math.Min(560f, Math.Max(320f, ImGui.GetContentRegionAvail().X));
-            const float h = 320f;
+            const float h = 300f;
             Vector2 origin = ImGui.GetCursorScreenPos();
             ImGui.Dummy(new Vector2(w, h));
             var dl = ImGui.GetWindowDrawList();
-            dl.AddRectFilled(origin, origin + new Vector2(w, h), Col(24, 24, 30));
-            dl.AddRect(origin, origin + new Vector2(w, h), Col(60, 60, 70));
 
-            float cx = origin.X + w * 0.5f, cy = origin.Y + h * 0.5f;
-            dl.AddLine(new Vector2(origin.X, cy), new Vector2(origin.X + w, cy), Col(45, 48, 58));
-            dl.AddLine(new Vector2(cx, origin.Y), new Vector2(cx, origin.Y + h), Col(45, 48, 58));
-            // 对角线：左上->右下 = 反相；左下->右上 = 同相(中置)
-            dl.AddLine(new Vector2(origin.X, origin.Y), new Vector2(origin.X + w, origin.Y + h), Col(58, 62, 74));
-            dl.AddLine(new Vector2(origin.X, origin.Y + h), new Vector2(origin.X + w, origin.Y), Col(58, 62, 74));
+            float cx = origin.X + w * 0.5f;
+            float cy = origin.Y + h - 8f;            // 平底边
+            float R = Math.Min(w * 0.5f - 10f, h - 12f);
 
-            // 自动缩放到峰值（下限 0.1，安静也有形状）
+            // 半圆盘（平底在下）+ 边缘线
+            dl.PathClear();
+            dl.PathLineTo(new Vector2(cx - R, cy));
+            dl.PathArcTo(new Vector2(cx, cy), R, (float)Math.PI, 2f * (float)Math.PI, 72);
+            dl.PathFillConvex(Col(24, 24, 30));
+            dl.PathClear();
+            dl.PathLineTo(new Vector2(cx - R, cy));
+            dl.PathArcTo(new Vector2(cx, cy), R, (float)Math.PI, 2f * (float)Math.PI, 72);
+            dl.PathLineTo(new Vector2(cx + R, cy));
+            dl.PathStroke(Col(60, 60, 70), ImDrawFlags.Closed, 1.2f);
+
+            // 指引：中轴、±45° 辐条、内弧
+            dl.AddLine(new Vector2(cx, cy), new Vector2(cx, cy - R), Col(50, 54, 64));
+            float d45 = R * 0.7071f;
+            dl.AddLine(new Vector2(cx, cy), new Vector2(cx - d45, cy - d45), Col(50, 54, 64));
+            dl.AddLine(new Vector2(cx, cy), new Vector2(cx + d45, cy - d45), Col(50, 54, 64));
+            dl.PathClear();
+            dl.PathArcTo(new Vector2(cx, cy), R * 0.55f, (float)Math.PI, 2f * (float)Math.PI, 48);
+            dl.PathStroke(Col(50, 54, 64), ImDrawFlags.None, 1f);
+
+            // 极坐标散点：角度=瞬时声相 atan2(R−L, R+L)，半径=幅度（峰值自动缩放，裁进盘内）
             float peak = 0.1f;
             for (int i = 0; i < _gonL.Length; i += 4)
             {
-                float a = Math.Abs(_gonL[i]);
-                if (a > peak) peak = a;
-                float b2 = Math.Abs(_gonR[i]);
-                if (b2 > peak) peak = b2;
+                float m = (float)Math.Sqrt((double)_gonL[i] * _gonL[i] + (double)_gonR[i] * _gonR[i]);
+                if (m > peak) peak = m;
             }
-            float scale = Math.Min(w, h) * 0.47f / peak;
-            uint dot = 0xA0D8E0F0; // 半透明亮点：出现密度即天然持久
+            float scale = (R - 4f) / peak;
+            const float clampA = 1.5533f; // 89°：反相内容堆在底边两侧（贴边=反相提示）
+            uint dot = 0x90FFC44A;        // 琥珀色，重叠处自然增亮
             for (int i = 0; i < _gonL.Length; i++)
             {
-                float x = cx + _gonL[i] * scale;
-                float y = cy - _gonR[i] * scale;
+                float l = _gonL[i], r = _gonR[i];
+                float theta = (float)Math.Atan2(r - l, r + l);
+                if (theta > clampA) theta = clampA;
+                else if (theta < -clampA) theta = -clampA;
+                float mag = (float)Math.Sqrt((double)l * l + (double)r * r) * scale;
+                if (mag > R - 2f) mag = R - 2f;
+                float x = cx + mag * (float)Math.Sin(theta);
+                float y = cy - mag * (float)Math.Cos(theta);
                 dl.AddRectFilled(new Vector2(x, y), new Vector2(x + 1, y + 1), dot);
             }
-            dl.AddText(new Vector2(origin.X + 6, origin.Y + 4), Col(120, 125, 140), "X=左耳  Y=右耳");
-            dl.AddText(new Vector2(origin.X + w - 132, origin.Y + 4), Col(120, 125, 140), "右上对角=同相中置");
-            dl.AddText(new Vector2(origin.X + 6, origin.Y + h - 16), Col(120, 125, 140), "圆=宽  线=窄  横带=反相");
+
+            dl.AddText(new Vector2(origin.X + 8, origin.Y + 6), Col(150, 155, 170), "L");
+            dl.AddText(new Vector2(origin.X + w - 16, origin.Y + 6), Col(150, 155, 170), "R");
+            dl.AddText(new Vector2(cx - 92, origin.Y + h - 17), Col(120, 125, 140),
+                "中轴=同相  贴底边=反相  越外越响");
         }
 
         /// <summary>中心零点横条（-1..+1）。画完调用方再 SameLine 放数值。</summary>
