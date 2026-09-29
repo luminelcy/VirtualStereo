@@ -215,10 +215,8 @@ namespace VirtualStereo.Desktop
             if (app.PlayerError != null)
                 ImGui.TextColored(new System.Numerics.Vector4(1, 0.4f, 0.4f, 1), "播放错误: " + app.PlayerError);
 
-            ImGui.Text("输出峰值（后置增益之后）");
-            ImGui.ProgressBar(Math.Min(app.OutPeak, 1.5f) / 1.5f, new Vector2(320, 18), "");
-            ImGui.SameLine();
-            ImGui.Text($"{app.OutPeak:F3}" + (app.OutPeak > 1f ? "   爆电平！" : ""));
+            ImGui.Text("输出电平（后置增益之后；峰值保持 1.8s 后 30dB/s 回落）");
+            DrawOutputMeters(app);
 
             ImGui.Spacing();
             if (ImGui.Checkbox("静音原声（消双响）", ref _silenceTmp))
@@ -277,6 +275,85 @@ namespace VirtualStereo.Desktop
                 ImGui.SameLine();
                 ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), $"录制中 {mon.RecSeconds:F1}s");
             }
+        }
+
+        // ── 输出电平表（峰值保持 1.8s 后 30dB/s 回落）──
+        private static float _holdL = -60f, _holdR = -60f;
+        private static long _holdLt, _holdRt;
+
+        private static float ToDb(float v) => (float)(20.0 * Math.Log10(Math.Max(1e-7, v)));
+
+        private static uint MeterColor(float db) =>
+            db > 0f ? Col(240, 70, 60)
+            : db > -6f ? Col(240, 130, 50)
+            : db > -12f ? Col(230, 190, 60)
+            : Col(80, 200, 90);
+
+        private static float PeakHold(ref float baseVal, ref long since, float db, long now)
+        {
+            if (db >= baseVal) { baseVal = db; since = now; }
+            float el = now - since;
+            float decay = el > 1800f ? 30f * (el - 1800f) / 1000f : 0f;
+            return Math.Max(db, baseVal - decay);
+        }
+
+        private static void DrawOutputMeters(DesktopApp app)
+        {
+            const float scaleMin = -60f, scaleMax = 6f;
+            long now = Environment.TickCount64;
+            float dbL = Math.Clamp(ToDb(app.OutPeakL), scaleMin, scaleMax);
+            float dbR = Math.Clamp(ToDb(app.OutPeakR), scaleMin, scaleMax);
+            float holdL = PeakHold(ref _holdL, ref _holdLt, dbL, now);
+            float holdR = PeakHold(ref _holdR, ref _holdRt, dbR, now);
+
+            const float rowH = 20f;
+            float w = 470f;
+            Vector2 o = ImGui.GetCursorScreenPos();
+            ImGui.Dummy(new Vector2(w, rowH * 2 + 17));
+            var dl = ImGui.GetWindowDrawList();
+
+            float x0 = o.X + 14f, bw = w - 14f - 78f;
+            DrawMeterRow(dl, x0, o.Y, bw, rowH - 4, dbL, holdL, "L", scaleMin, scaleMax);
+            DrawMeterRow(dl, x0, o.Y + rowH, bw, rowH - 4, dbR, holdR, "R", scaleMin, scaleMax);
+
+            // dB 刻度（与条对齐）
+            float PosT(float db) => (Math.Clamp(db, scaleMin, scaleMax) - scaleMin) / (scaleMax - scaleMin) * bw;
+            foreach (int t in new[] { -60, -40, -30, -20, -12, -6, 0 })
+            {
+                float x = x0 + PosT(t);
+                dl.AddLine(new Vector2(x, o.Y + rowH * 2), new Vector2(x, o.Y + rowH * 2 + 3), Col(95, 100, 115));
+                string lbl = t.ToString(CultureInfo.InvariantCulture);
+                dl.AddText(new Vector2(x - (lbl.Length > 2 ? 11 : lbl.Length > 1 ? 7 : 4),
+                    o.Y + rowH * 2 + 4), Col(95, 100, 115), lbl);
+            }
+
+            if (app.OutPeak > 1f)
+                ImGui.TextColored(new Vector4(1f, 0.35f, 0.3f, 1f), "爆电平！");
+        }
+
+        private static void DrawMeterRow(ImDrawListPtr dl, float x, float y, float w, float h,
+            float db, float hold, string label, float min, float max)
+        {
+            float Pos(float v) => (Math.Clamp(v, min, max) - min) / (max - min) * w;
+
+            dl.AddRectFilled(new Vector2(x, y), new Vector2(x + w, y + h), Col(30, 32, 40));
+            // 警告(-6..0)/危险(0..+)区段暗底
+            dl.AddRectFilled(new Vector2(x + Pos(-6f), y + 1), new Vector2(x + Pos(0f), y + h - 1), Col(52, 44, 22));
+            dl.AddRectFilled(new Vector2(x + Pos(0f), y + 1), new Vector2(x + w, y + h - 1), Col(58, 26, 26));
+            // 峰值填充（按电平变色）
+            float px = x + Pos(db);
+            if (px > x + 1f)
+                dl.AddRectFilled(new Vector2(x + 1, y + 1), new Vector2(px, y + h - 1), MeterColor(db));
+            // 峰值保持线
+            float hx = x + Pos(hold);
+            dl.AddRectFilled(new Vector2(hx - 1, y + 1), new Vector2(hx + 1, y + h - 1), Col(235, 235, 240));
+            dl.AddRect(new Vector2(x, y), new Vector2(x + w, y + h), Col(60, 60, 70));
+
+            dl.AddText(new Vector2(x - 13, y + (h - 12) * 0.5f), Col(150, 155, 170), label);
+            string val = db <= min + 0.01f ? "静音"
+                : db.ToString("F1", CultureInfo.InvariantCulture) + " dB";
+            dl.AddText(new Vector2(x + w + 6, y + (h - 12) * 0.5f),
+                db > 0f ? Col(240, 70, 60) : Col(150, 155, 170), val);
         }
 
         /// <summary>增益行：滑条 + 文本框（Ctrl+点滑条也能输）。</summary>

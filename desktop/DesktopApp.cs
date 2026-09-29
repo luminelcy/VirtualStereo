@@ -66,6 +66,8 @@ namespace VirtualStereo.Desktop
         // ── 状态读数（音频线程写 / UI 读）──
         public volatile float OutPeak;
         public volatile float OutRms;
+        public volatile float OutPeakL; // 分通道峰值（电平表用）
+        public volatile float OutPeakR;
         public float CaptureRms => _capture?.Rms ?? 0f;
         public float CaptureL => _capture?.RmsL ?? 0f;
         public float CaptureR => _capture?.RmsR ?? 0f;
@@ -322,17 +324,23 @@ namespace VirtualStereo.Desktop
                 for (int i = 0; i < Chunk * 2; i++) _stereo[i] *= pg;
             }
 
-            // 输出电平统计
-            float peak = 0f;
+            // 输出电平统计（含分通道峰值）
+            float peak = 0f, pkL = 0f, pkR = 0f;
             double sq = 0;
-            for (int i = 0; i < Chunk * 2; i++)
+            for (int i = 0; i < Chunk; i++)
             {
-                float v = _stereo[i];
-                float a = v < 0 ? -v : v;
+                float l = _stereo[i * 2], r = _stereo[i * 2 + 1];
+                float a = l < 0f ? -l : l;
+                float b = r < 0f ? -r : r;
+                if (a > pkL) pkL = a;
+                if (b > pkR) pkR = b;
                 if (a > peak) peak = a;
-                sq += v * v;
+                if (b > peak) peak = b;
+                sq += (double)l * l + (double)r * r;
             }
             OutPeak = peak;
+            OutPeakL = pkL;
+            OutPeakR = pkR;
             OutRms = (float)Math.Sqrt(sq / (Chunk * 2));
             _stagePos = 0;
         }
