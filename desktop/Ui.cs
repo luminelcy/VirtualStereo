@@ -1511,9 +1511,13 @@ namespace VirtualStereo.Desktop
                 ImGui.TextDisabled($"对照：音源 L/R 相关 {app.SourceCorrelation:F2}（捕获输入侧）");
             ImGui.TextDisabled("双耳渲染后两耳天然去相关是正常的；要看出处理前后差异看上面的音源对照");
 
-            // 声像分析：位置与宽度随时间
+            // 声像分析：半圆声像图（瞬时）+ 时间线（演化）
             ImGui.Spacing();
-            ImGui.Text("声像分析：位置与宽度随时间（滚动 30 秒）");
+            ImGui.Text("声像分析：半圆声像图（琥珀扇形 = 声像分布）");
+            ImGui.TextDisabled("扇形方位=声像位置（中轴=居中）  展开角=宽度  半径=幅度  贴底边=反相");
+            DrawSoundImageBox();
+
+            ImGui.Text("声像随时间（滚动 30 秒）");
             ImGui.TextDisabled("白线=声像中心（平衡），色带=声像宽度（±半宽）；上=偏右 / 下=偏左");
             DrawPanTimelineBox();
 
@@ -1579,7 +1583,7 @@ namespace VirtualStereo.Desktop
             // 两轴：纵 M（中间/同相）横 S（侧边/宽度）
             dl.AddLine(new Vector2(origin.X, cy), new Vector2(origin.X + w, cy), Col(45, 48, 58));
             dl.AddLine(new Vector2(cx, origin.Y), new Vector2(cx, origin.Y + h), Col(45, 48, 58));
-            // 对角 = 单边内容：左上<-右下 为纯 L（S 负 M 正在左上），纯 R 在右上
+            // 对角 = 单边内容：纯 L 在左上（S 负 M 正），纯 R 在右上
             dl.AddLine(new Vector2(origin.X, origin.Y), new Vector2(origin.X + w, origin.Y + h), Col(58, 62, 74));
             dl.AddLine(new Vector2(origin.X, origin.Y + h), new Vector2(origin.X + w, origin.Y), Col(58, 62, 74));
 
@@ -1609,6 +1613,71 @@ namespace VirtualStereo.Desktop
             dl.AddText(new Vector2(origin.X + w - 104, origin.Y + 4), Col(150, 155, 170), "S 侧边 = R−L");
             dl.AddText(new Vector2(origin.X + 6, origin.Y + h - 16), Col(120, 125, 140),
                 "竖=单声道  横=反相  对角=单边（左上=纯L  右上=纯R）");
+        }
+
+        /// <summary>半圆声像图：扇形方位=声像位置，半径=幅度（琥珀散点）。</summary>
+        private static void DrawSoundImageBox()
+        {
+            float w = Math.Min(560f, Math.Max(320f, ImGui.GetContentRegionAvail().X));
+            const float h = 300f;
+            Vector2 origin = ImGui.GetCursorScreenPos();
+            ImGui.Dummy(new Vector2(w, h));
+            var dl = ImGui.GetWindowDrawList();
+
+            float cx = origin.X + w * 0.5f;
+            float cy = origin.Y + h - 8f;            // 平底边
+            float R = Math.Min(w * 0.5f - 10f, h - 12f);
+
+            // 半圆盘（平底在下）+ 边缘线
+            dl.PathClear();
+            dl.PathLineTo(new Vector2(cx - R, cy));
+            dl.PathArcTo(new Vector2(cx, cy), R, (float)Math.PI, 2f * (float)Math.PI, 72);
+            dl.PathFillConvex(Col(24, 24, 30));
+            dl.PathClear();
+            dl.PathLineTo(new Vector2(cx - R, cy));
+            dl.PathArcTo(new Vector2(cx, cy), R, (float)Math.PI, 2f * (float)Math.PI, 72);
+            dl.PathLineTo(new Vector2(cx + R, cy));
+            dl.PathStroke(Col(60, 60, 70), ImDrawFlags.Closed, 1.2f);
+
+            // 指引：中轴=居中，±45° 辐条=单边 L/R，内弧
+            dl.AddLine(new Vector2(cx, cy), new Vector2(cx, cy - R), Col(50, 54, 64));
+            float d45 = R * 0.7071f;
+            dl.AddLine(new Vector2(cx, cy), new Vector2(cx - d45, cy - d45), Col(50, 54, 64));
+            dl.AddLine(new Vector2(cx, cy), new Vector2(cx + d45, cy - d45), Col(50, 54, 64));
+            dl.PathClear();
+            dl.PathArcTo(new Vector2(cx, cy), R * 0.55f, (float)Math.PI, 2f * (float)Math.PI, 48);
+            dl.PathStroke(Col(50, 54, 64), ImDrawFlags.None, 1f);
+
+            // 极坐标散点：方位角 = 声像位置，半径 = 幅度（峰值自动缩放）
+            float peak = 0.1f;
+            for (int i = 0; i < _gonL.Length; i += 4)
+            {
+                float m = (float)Math.Sqrt((double)_gonL[i] * _gonL[i] + (double)_gonR[i] * _gonR[i]);
+                if (m > peak) peak = m;
+            }
+            float scale = (R - 4f) / peak;
+            const float clampA = 1.5533f; // 89°：反相内容堆在底边两侧
+            uint dot = 0x90FFC44A;        // 琥珀色，重叠自然增亮
+            for (int i = 0; i < _gonL.Length; i++)
+            {
+                float s = _gonR[i] - _gonL[i];
+                float m = _gonR[i] + _gonL[i];
+                float theta = (float)Math.Atan2(s, m);
+                if (theta > clampA) theta = clampA;
+                else if (theta < -clampA) theta = -clampA;
+                float mag = (float)Math.Sqrt((double)_gonL[i] * _gonL[i]
+                    + (double)_gonR[i] * _gonR[i]) * scale;
+                if (mag > R - 2f) mag = R - 2f;
+                float x = cx + mag * (float)Math.Sin(theta);
+                float y = cy - mag * (float)Math.Cos(theta);
+                dl.AddRectFilled(new Vector2(x, y), new Vector2(x + 1, y + 1), dot);
+            }
+
+            dl.AddText(new Vector2(origin.X + 8, origin.Y + 6), Col(150, 155, 170), "L");
+            dl.AddText(new Vector2(origin.X + w - 16, origin.Y + 6), Col(150, 155, 170), "R");
+            float hx = Math.Max(origin.X + 6, cx - 160f);
+            dl.AddText(new Vector2(hx, origin.Y + h - 17), Col(120, 125, 140),
+                "扇形方位=声像  展开=宽度  半径=幅度  贴底边=反相");
         }
 
         // ── 声像时间线（100ms × 300 = 30s，主循环泵推进）──
