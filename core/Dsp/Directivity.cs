@@ -59,7 +59,102 @@ namespace VirtualStereo.Dsp
 
         private readonly float[] _g = new float[Bands]; // 音频线程 scratch（单线程使用）
 
+        // 热图解析求值（UI 线程）：探针分频 + 每带增益 scratch + 列响应缓存
+        private readonly LrCrossover[] _probe;
+        private readonly float[] _probeFreq = new float[Splits];
+        private readonly float[] _gProbe = new float[Bands];
+        private float _probeSr = -1f;
+        private float[] _stgLoRe, _stgLoIm, _stgHiRe, _stgHiIm;
+
+        public DirectivityProcessor()
+        {
+            _probe = new LrCrossover[Splits];
+            for (int k = 0; k < Splits; k++) _probe[k] = new LrCrossover();
+        }
+
         public DirectivityState CreateState() => new DirectivityState();
+
+        /// <summary>指向性热图网格（解析求值，与 Process 完全同构：LR4 分带 × 图案增益复数求和）。
+        /// dst[row*cols+col]（dB）；row 0=顶(+180°) … rows−1=底(−180°)；col 为 100..20000Hz 对数网格。
+        /// horizontal: 扫方位角（仰角 0）；否则扫仰角（方位 0）。带间相位在分频点有影响，
+        /// 必须复数求和——幅响相加会把 LR4 修好的分频点又算出假谷。</summary>
+        public void ResponseGrid(float[] dst, int rows, int cols, bool horizontal,
+            int aimMode, float aimAz, float aimEl, float sampleRate)
+        {
+            RefreshProbe(sampleRate);
+
+            // 列预计算：每个频率上 5 个分频点的 LP/HP 复数响应（与角度无关，全部行共享）
+            int need = Splits * cols;
+            if (_stgLoRe == null || _stgLoRe.Length < need)
+            {
+                _stgLoRe = new float[need];
+                _stgLoIm = new float[need];
+                _stgHiRe = new float[need];
+                _stgHiIm = new float[need];
+            }
+            double ratio = Math.Log(20000.0 / 100.0);
+            for (int c = 0; c < cols; c++)
+            {
+                float f = (float)(100.0 * Math.Exp(ratio * c / (cols - 1)));
+                for (int k = 0; k < Splits; k++)
+                {
+                    _probe[k].ComplexLow(f, sampleRate, out float r, out float i);
+                    _stgLoRe[k * cols + c] = r;
+                    _stgLoIm[k * cols + c] = i;
+                    _probe[k].ComplexHigh(f, sampleRate, out r, out i);
+                    _stgHiRe[k * cols + c] = r;
+                    _stgHiIm[k * cols + c] = i;
+                }
+            }
+
+            // 行：每角度取图案增益（一次），列内做分带复数递推
+            float angStep = 360f / (rows - 1);
+            for (int r = 0; r < rows; r++)
+            {
+                float ang = 180f - r * angStep;
+                GainsInto(horizontal ? ang : 0f, horizontal ? 0f : ang,
+                    aimMode, aimAz, aimEl, _gProbe);
+
+                for (int c = 0; c < cols; c++)
+                {
+                    // band_b = low_b × Π_{k<b} high_k；末带无 low
+                    float phRe = 1f, phIm = 0f;
+                    double sumRe = 0, sumIm = 0;
+                    for (int b = 0; b < Bands; b++)
+                    {
+                        int ci = b * cols + c;
+                        if (b < Splits)
+                        {
+                            float bandRe = phRe * _stgLoRe[ci] - phIm * _stgLoIm[ci];
+                            float bandIm = phRe * _stgLoIm[ci] + phIm * _stgLoRe[ci];
+                            sumRe += bandRe * _gProbe[b];
+                            sumIm += bandIm * _gProbe[b];
+                            float nRe = phRe * _stgHiRe[ci] - phIm * _stgHiIm[ci];
+                            phIm = phRe * _stgHiIm[ci] + phIm * _stgHiRe[ci];
+                            phRe = nRe;
+                        }
+                        else
+                        {
+                            sumRe += phRe * _gProbe[b];
+                            sumIm += phIm * _gProbe[b];
+                        }
+                    }
+                    dst[r * cols + c] = (float)(20.0 * Math.Log10(
+                        Math.Max(1e-9, Math.Sqrt(sumRe * sumRe + sumIm * sumIm))));
+                }
+            }
+        }
+
+        private void RefreshProbe(float sampleRate)
+        {
+            for (int k = 0; k < Splits; k++)
+            {
+                if (sampleRate == _probeSr && Math.Abs(Freqs[k] - _probeFreq[k]) < 0.01f) continue;
+                _probe[k].Set(sampleRate, Freqs[k]);
+                _probeFreq[k] = Freqs[k];
+            }
+            _probeSr = sampleRate;
+        }
 
         /// <summary>处理一块单声道（就地）。state = 该声源独享的滤波状态。
         /// 朝向每源独立：aimMode/aimAz/aimEl 决定该音箱的指向。</summary>
@@ -201,6 +296,24 @@ namespace VirtualStereo.Dsp
 
         public float TickLow(float s) => _lpB.Tick(_lpA.Tick(s));
         public float TickHigh(float s) => _hpB.Tick(_hpA.Tick(s));
+
+        /// <summary>低通支路复数频响（两段 BW2 级联）——热图解析求值用。</summary>
+        public void ComplexLow(float freq, float sr, out float re, out float im)
+        {
+            _lpA.Response(freq, sr, out float ar, out float ai);
+            _lpB.Response(freq, sr, out float br, out float bi);
+            re = ar * br - ai * bi;
+            im = ar * bi + ai * br;
+        }
+
+        /// <summary>高通支路复数频响。</summary>
+        public void ComplexHigh(float freq, float sr, out float re, out float im)
+        {
+            _hpA.Response(freq, sr, out float ar, out float ai);
+            _hpB.Response(freq, sr, out float br, out float bi);
+            re = ar * br - ai * bi;
+            im = ar * bi + ai * br;
+        }
     }
 
     /// <summary>2阶 Butterworth 双二阶（RBJ cookbook），转置直接 II 型。</summary>
@@ -276,6 +389,24 @@ namespace VirtualStereo.Dsp
 
         /// <summary>清零状态（切换校准开关时用，防残留瞬态）。</summary>
         public void Reset() { _z1 = 0f; _z2 = 0f; }
+
+        /// <summary>H(e^{jw}) 复数频响（直角坐标）。带间重组必须复数相加——
+        /// 幅响求和在分频点会算错（BW 功率互补非幅度互补的老坑）。</summary>
+        public void Response(float freq, float sr, out float re, out float im)
+        {
+            double w = 2 * Math.PI * freq / sr;
+            double cw = Math.Cos(w), sw = Math.Sin(w);
+            double c2 = 2 * cw * cw - 1, s2 = 2 * sw * cw; // 二倍角，省两次三角
+            // N = b0 + b1·z⁻¹ + b2·z⁻²，z⁻¹ = e^{-jw}
+            double nr = _b0 + _b1 * cw + _b2 * c2;
+            double ni = -(_b1 * sw + _b2 * s2);
+            double dr = 1 + _a1 * cw + _a2 * c2;
+            double di = -(_a1 * sw + _a2 * s2);
+            double d2 = dr * dr + di * di;
+            if (d2 < 1e-300) d2 = 1e-300;
+            re = (float)((nr * dr + ni * di) / d2);
+            im = (float)((ni * dr - nr * di) / d2);
+        }
 
         /// <summary>幅度响应（dB）——校准面板画"EQ 合成曲线"用。
         /// 零极点分解式：多项式形式在高 Q 极点附近浮点相消，会算出 ±100dB 假尖峰。</summary>

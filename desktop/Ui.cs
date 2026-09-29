@@ -687,6 +687,155 @@ namespace VirtualStereo.Desktop
             ImGui.Text("              R: " + GainsText(_gR));
             if (AllNearOne(_gL) && AllNearOne(_gR))
                 ImGui.TextDisabled("（增益全 1.00 = 当前配置无指向性效果）");
+
+            // 指向性热图：解析计算（与信号链同一套分频/图案），参数一变 200ms 内刷新
+            ImGui.Spacing();
+            ImGui.Text("指向性热图（解析计算，与信号链同一套分频/图案；200ms 刷新）");
+            int dirSrc = _dirSrc;
+            if (ImGui.RadioButton("L箱##dirsrc", ref dirSrc, 0)) { _dirSrc = dirSrc; _dirAt = 0; }
+            ImGui.SameLine();
+            if (ImGui.RadioButton("R箱##dirsrc", ref dirSrc, 1)) { _dirSrc = dirSrc; _dirAt = 0; }
+            ImGui.SameLine();
+            int am = _dirSrc == 0 ? app.AimModeL : app.AimModeR;
+            ImGui.TextDisabled("该源朝向: " + (am == 0 ? "朝向听者（θ恒0 -> 全图平直）"
+                : am == 1 ? "固定朝前 +Z"
+                : $"手动 az={(_dirSrc == 0 ? app.AimAzL : app.AimAzR):F0}° el={(_dirSrc == 0 ? app.AimElL : app.AimElR):F0}°"));
+            DrawDirMaps(app);
+        }
+
+        // ── 指向性热图（水平/垂直）──
+        private const int DirRows = 91;  // 4° 步长（顶 +180° … 底 −180°）
+        private const int DirCols = 104; // 100..20000Hz 对数
+        private static readonly float[] _dirH = new float[DirRows * DirCols];
+        private static readonly float[] _dirV = new float[DirRows * DirCols];
+        private static long _dirAt;
+        private static int _dirSrc; // 0=L 1=R
+
+        // 彩虹色标：-50..+10 dB（紫蓝青绿黄橙红），过亮泛白
+        private static readonly float[] HeatPos = { 0f, 0.17f, 0.33f, 0.5f, 0.67f, 0.83f, 1f };
+        private static readonly byte[,] HeatRGB =
+        {
+            { 70, 30, 130 }, { 40, 60, 200 }, { 0, 165, 220 }, { 60, 190, 80 },
+            { 240, 220, 60 }, { 245, 130, 40 }, { 230, 55, 40 },
+        };
+
+        private static uint HeatColor(float db)
+        {
+            if (db >= 6f) return Col(255, 255, 240);
+            float t = Math.Clamp((db + 50f) / 60f, 0f, 1f);
+            int i = 0;
+            while (i < HeatPos.Length - 2 && t > HeatPos[i + 1]) i++;
+            float u = (t - HeatPos[i]) / (HeatPos[i + 1] - HeatPos[i]);
+            float r = HeatRGB[i, 0] + (HeatRGB[i + 1, 0] - HeatRGB[i, 0]) * u;
+            float g = HeatRGB[i, 1] + (HeatRGB[i + 1, 1] - HeatRGB[i, 1]) * u;
+            float b = HeatRGB[i, 2] + (HeatRGB[i + 1, 2] - HeatRGB[i, 2]) * u;
+            return Col((byte)r, (byte)g, (byte)b);
+        }
+
+        private static void DrawDirMaps(DesktopApp app)
+        {
+            if (Environment.TickCount64 >= _dirAt)
+            {
+                _dirAt = Environment.TickCount64 + 200;
+                var d = app.Directivity;
+                int mode = _dirSrc == 0 ? app.AimModeL : app.AimModeR;
+                float aimAz = _dirSrc == 0 ? app.AimAzL : app.AimAzR;
+                float aimEl = _dirSrc == 0 ? app.AimElL : app.AimElR;
+                float sr = app.OutputRate;
+                d.ResponseGrid(_dirH, DirRows, DirCols, true, mode, aimAz, aimEl, sr);
+                d.ResponseGrid(_dirV, DirRows, DirCols, false, mode, aimAz, aimEl, sr);
+            }
+
+            float totalW = Math.Min(940f, Math.Max(560f, ImGui.GetContentRegionAvail().X));
+            const float gapMap = 20f, cbarW = 14f, cbarLbl = 30f;
+            float mapW = (totalW - gapMap - cbarW - cbarLbl - 8f) / 2f;
+            const float plotH = 250f;
+            const float canvasH = 44 + 250 + 34;
+            Vector2 o = ImGui.GetCursorScreenPos();
+            ImGui.Dummy(new Vector2(totalW, canvasH));
+            var dl = ImGui.GetWindowDrawList();
+
+            DrawOneDirMap(dl, o.X, o.Y, mapW, plotH, _dirH, true);
+            DrawOneDirMap(dl, o.X + mapW + gapMap, o.Y, mapW, plotH, _dirV, false);
+            DrawHeatColorBar(dl, o.X + 2 * mapW + gapMap + 6f, o.Y + 44f, cbarW, plotH);
+        }
+
+        private static void DrawOneDirMap(ImDrawListPtr dl, float x, float y, float mapW,
+            float plotH, float[] data, bool horizontal)
+        {
+            string title = horizontal ? "水平指向性" : "垂直指向性";
+            string en = horizontal ? "Horizontal directivity" : "Vertical directivity";
+            dl.AddText(new Vector2(x, y), Col(232, 232, 240), title);
+            dl.AddText(new Vector2(x + 100, y + 2), Col(145, 150, 165), en);
+            dl.AddText(new Vector2(x, y + 20), Col(145, 150, 165), "角度 (°)");
+
+            float plotX = x + 32f, plotW = mapW - 32f;
+            float plotY = y + 44f;
+
+            // 单元格（0.5px 外扩消缝）
+            float cellW = plotW / DirCols, cellH = plotH / DirRows;
+            for (int r = 0; r < DirRows; r++)
+            {
+                float y0 = plotY + r * cellH;
+                int rowBase = r * DirCols;
+                for (int c = 0; c < DirCols; c++)
+                {
+                    var p0 = new Vector2(plotX + c * cellW, y0);
+                    var p1 = new Vector2(plotX + (c + 1) * cellW + 0.5f, y0 + cellH + 0.5f);
+                    dl.AddRectFilled(p0, p1, HeatColor(data[rowBase + c]));
+                }
+            }
+            dl.AddRect(new Vector2(plotX, plotY),
+                new Vector2(plotX + plotW, plotY + plotH), Col(70, 70, 80));
+
+            // 角度刻度（每 30°）+ 参考虚线（0, ±60°）
+            for (int a = 180; a >= -180; a -= 30)
+            {
+                float yy = plotY + (180f - a) / 360f * plotH;
+                string lbl = a.ToString(CultureInfo.InvariantCulture);
+                dl.AddText(new Vector2(x + 30f - lbl.Length * 7f, yy - 6f), Col(225, 225, 235), lbl);
+                if (a == 60 || a == 0 || a == -60)
+                    DashH(dl, plotX, plotX + plotW, yy, Col(245, 245, 250));
+            }
+
+            // 频率刻度 + 轴名
+            double fRatio = Math.Log(20000.0 / 100.0);
+            foreach (int f in new[] { 200, 500, 1000, 2000, 5000, 10000, 20000 })
+            {
+                float xx = plotX + (float)(Math.Log(f / 100.0) / fRatio) * plotW;
+                dl.AddLine(new Vector2(xx, plotY + plotH),
+                    new Vector2(xx, plotY + plotH + 4), Col(160, 165, 180));
+                string lbl = f >= 1000 ? (f / 1000) + "k" : f.ToString(CultureInfo.InvariantCulture);
+                dl.AddText(new Vector2(xx - lbl.Length * 4f, plotY + plotH + 6),
+                    Col(225, 225, 235), lbl);
+            }
+            dl.AddText(new Vector2(plotX + plotW * 0.5f - 32f, plotY + plotH + 22),
+                Col(145, 150, 165), "频率 (Hz)");
+        }
+
+        private static void DashH(ImDrawListPtr dl, float x0, float x1, float y, uint col)
+        {
+            for (float x = x0; x < x1; x += 12f)
+                dl.AddLine(new Vector2(x, y), new Vector2(Math.Min(x + 7f, x1), y), col, 1.2f);
+        }
+
+        private static void DrawHeatColorBar(ImDrawListPtr dl, float x, float y, float w, float h)
+        {
+            const int segs = 60;
+            float segH = h / segs;
+            for (int i = 0; i < segs; i++)
+            {
+                float db = 10f - (i + 0.5f) * 60f / segs;
+                dl.AddRectFilled(new Vector2(x, y + i * segH),
+                    new Vector2(x + w, y + (i + 1) * segH + 0.5f), HeatColor(db));
+            }
+            dl.AddRect(new Vector2(x, y), new Vector2(x + w, y + h), Col(70, 70, 80));
+            foreach (int db in new[] { 10, 0, -10, -20, -30, -40, -50 })
+            {
+                float yy = y + (10f - db) / 60f * h;
+                string lbl = db > 0 ? "+" + db : db.ToString(CultureInfo.InvariantCulture);
+                dl.AddText(new Vector2(x + w + 4, yy - 6f), Col(225, 225, 235), lbl);
+            }
         }
 
         private static readonly float[] _gL = new float[DirectivityProcessor.Bands];
