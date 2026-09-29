@@ -30,6 +30,10 @@ var io = ImGui.GetIO();
 io.Fonts.Clear();
 io.Fonts.AddFontFromFileTTF(@"C:\Windows\Fonts\msyh.ttc", 16f, null, io.Fonts.GetGlyphRangesChineseFull());
 controller.RecreateFontDeviceTexture();
+// 单窗口 16 位索引上限 64k 顶点：指向性热图（双图约 7.5 万顶点）超限后索引回绕、
+// 整页图形/字体错乱（看着像内存污染，其实是确定性索引环绕）。
+// Veldrid.ImGui 的 DrawIndexed 已传 base vertex，开 RendererHasVtxOffset 让 ImGui 自动分片。
+io.BackendFlags |= ImGuiBackendFlags.RendererHasVtxOffset;
 
 window.Resized += () =>
 {

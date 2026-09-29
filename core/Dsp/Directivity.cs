@@ -76,10 +76,10 @@ namespace VirtualStereo.Dsp
 
         /// <summary>指向性热图网格（解析求值，与 Process 完全同构：LR4 分带 × 图案增益复数求和）。
         /// dst[row*cols+col]（dB）；row 0=顶(+180°) … rows−1=底(−180°)；col 为 100..20000Hz 对数网格。
-        /// horizontal: 扫方位角（仰角 0）；否则扫仰角（方位 0）。带间相位在分频点有影响，
-        /// 必须复数求和——幅响相加会把 LR4 修好的分频点又算出假谷。</summary>
-        public void ResponseGrid(float[] dst, int rows, int cols, bool horizontal,
-            int aimMode, float aimAz, float aimEl, float sampleRate)
+        /// 扫描在音箱**自身坐标系**（0°=音箱正面），与摆放朝向无关——指向性是音箱固有参数。
+        /// 带间相位在分频点有影响，必须复数求和——幅响相加会把 LR4 修好的分频点又算出假谷。
+        /// 注：当前图案绕正面旋转对称（θ 只有一个），水平与垂直两图结果相同，这是模型决定的。</summary>
+        public void ResponseGrid(float[] dst, int rows, int cols, bool horizontal, float sampleRate)
         {
             RefreshProbe(sampleRate);
 
@@ -107,13 +107,14 @@ namespace VirtualStereo.Dsp
                 }
             }
 
-            // 行：每角度取图案增益（一次），列内做分带复数递推
+            // 行：每角度取图案增益（一次），列内做分带复数递推。
+            // 自身坐标系：正面固定 +Z，角度即离轴角——不随摆放朝向变
             float angStep = 360f / (rows - 1);
             for (int r = 0; r < rows; r++)
             {
                 float ang = 180f - r * angStep;
                 GainsInto(horizontal ? ang : 0f, horizontal ? 0f : ang,
-                    aimMode, aimAz, aimEl, _gProbe);
+                    (int)AimMode.HeadForward, 0f, 0f, _gProbe);
 
                 for (int c = 0; c < cols; c++)
                 {

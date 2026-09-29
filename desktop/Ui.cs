@@ -691,15 +691,8 @@ namespace VirtualStereo.Desktop
             // 指向性热图：解析计算（与信号链同一套分频/图案），参数一变 200ms 内刷新
             ImGui.Spacing();
             ImGui.Text("指向性热图（解析计算，与信号链同一套分频/图案；200ms 刷新）");
-            int dirSrc = _dirSrc;
-            if (ImGui.RadioButton("L箱##dirsrc", ref dirSrc, 0)) { _dirSrc = dirSrc; _dirAt = 0; }
-            ImGui.SameLine();
-            if (ImGui.RadioButton("R箱##dirsrc", ref dirSrc, 1)) { _dirSrc = dirSrc; _dirAt = 0; }
-            ImGui.SameLine();
-            int am = _dirSrc == 0 ? app.AimModeL : app.AimModeR;
-            ImGui.TextDisabled("该源朝向: " + (am == 0 ? "朝向听者（θ恒0 -> 全图平直）"
-                : am == 1 ? "固定朝前 +Z"
-                : $"手动 az={(_dirSrc == 0 ? app.AimAzL : app.AimAzR):F0}° el={(_dirSrc == 0 ? app.AimElL : app.AimElR):F0}°"));
+            ImGui.TextDisabled("音箱自身坐标系：正面=0°，与摆放朝向无关——指向性是音箱固有参数");
+            ImGui.TextDisabled("当前图案绕正面旋转对称（θ 只有一个）→ 水平/垂直两图结果相同");
             DrawDirMaps(app);
         }
 
@@ -709,7 +702,6 @@ namespace VirtualStereo.Desktop
         private static readonly float[] _dirH = new float[DirRows * DirCols];
         private static readonly float[] _dirV = new float[DirRows * DirCols];
         private static long _dirAt;
-        private static int _dirSrc; // 0=L 1=R
 
         // 彩虹色标：-50..+10 dB（紫蓝青绿黄橙红），过亮泛白
         private static readonly float[] HeatPos = { 0f, 0.17f, 0.33f, 0.5f, 0.67f, 0.83f, 1f };
@@ -738,12 +730,9 @@ namespace VirtualStereo.Desktop
             {
                 _dirAt = Environment.TickCount64 + 200;
                 var d = app.Directivity;
-                int mode = _dirSrc == 0 ? app.AimModeL : app.AimModeR;
-                float aimAz = _dirSrc == 0 ? app.AimAzL : app.AimAzR;
-                float aimEl = _dirSrc == 0 ? app.AimElL : app.AimElR;
                 float sr = app.OutputRate;
-                d.ResponseGrid(_dirH, DirRows, DirCols, true, mode, aimAz, aimEl, sr);
-                d.ResponseGrid(_dirV, DirRows, DirCols, false, mode, aimAz, aimEl, sr);
+                d.ResponseGrid(_dirH, DirRows, DirCols, true, sr);
+                d.ResponseGrid(_dirV, DirRows, DirCols, false, sr);
             }
 
             float totalW = Math.Min(940f, Math.Max(560f, ImGui.GetContentRegionAvail().X));
