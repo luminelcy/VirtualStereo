@@ -64,6 +64,8 @@ if (settings.DirW != null && settings.DirW.Length == DirectivityProcessor.Bands)
     for (int i = 0; i < DirectivityProcessor.Bands; i++) app.Directivity.W[i] = settings.DirW[i];
 if (settings.DirP != null && settings.DirP.Length == DirectivityProcessor.Bands)
     for (int i = 0; i < DirectivityProcessor.Bands; i++) app.Directivity.P[i] = settings.DirP[i];
+if (settings.DirAng != null && settings.DirAng.Length == DirectivityProcessor.Bands)
+    for (int i = 0; i < DirectivityProcessor.Bands; i++) app.Directivity.Ang[i] = settings.DirAng[i];
 app.AimModeL = settings.AimModeL;
 app.AimModeR = settings.AimModeR;
 app.AimAzL = settings.AimAzL;
@@ -148,6 +150,7 @@ void SaveSettings()
     settings.DirFreqs = (float[])app.Directivity.Freqs.Clone();
     settings.DirW = (float[])app.Directivity.W.Clone();
     settings.DirP = (float[])app.Directivity.P.Clone();
+    settings.DirAng = (float[])app.Directivity.Ang.Clone();
     settings.AimModeL = app.AimModeL;
     settings.AimModeR = app.AimModeR;
     settings.AimAzL = app.AimAzL;

@@ -98,6 +98,7 @@ namespace VirtualStereo.Desktop
         public float[] DirFreqs { get; set; } = { 125f, 350f, 1000f, 3000f, 10000f };
         public float[] DirW { get; set; } = { 0f, 0f, 0f, 0f, 0f, 0f };
         public float[] DirP { get; set; } = { 1f, 1f, 1f, 1f, 1f, 1f };
+        public float[] DirAng { get; set; } = null; // 锥形族：每带锥角（半角）；null=模型默认
 
         // 窗口
         public int WindowX { get; set; } = 80;

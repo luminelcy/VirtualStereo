@@ -1,10 +1,11 @@
 // 音箱指向性（频率相关）：N 分频带 + 图案，两个图案族可选：
-//   锥形族（默认，音箱用）：g = (1−w) + w·((1+cosθ)/2)^p —— 单调向前，
-//     背面压到 (1−w) 的底板，**永不回升**（现实音箱的锥形指向）
+//   锥形族（默认，音箱用）：按"锥角+锐度"参数化——
+//     锥角 α（半角）：θ≤α 内满电平；α=180° 即全向（一个参数覆盖全向→强指向）
+//     锐度 s：锥外 g=(α/θ)^s —— 超出锥体的衰减速度，每倍角 −6×s dB
+//     单调、无零点、背面不回升；强指向（如 α=20° s=6）90° 处可到 −78dB
 //   偶极子系（麦用，Steam Audio 公式）：g = |(1−w) + w·cosθ|^p
-//   w: 0=全向；p: 锐度/束宽
-// 注意：偶极子系 w>0.5 时括号在 ~90° 后过零、绝对值折回上升
-//   （w=0.9 时 96.4° 归零、180° 回到 −4.4dB）——麦的超心形/8字是这形状，音箱不是。
+//     w: 0=全向 0.5=心形 1=8字；p: 锐度
+//     注意 w>0.5 时 ~90° 后过零、绝对值折回上升（麦形状，音箱不是）
 //
 // 6 带 × 5 分频点（默认 125/350/1k/3k/10k，对数分布，最高可到 16k）：
 // 真实喇叭低频绕射强、高频聚拢，宽带单值图案表达不了——每带独立 (w, p)
@@ -61,8 +62,10 @@ namespace VirtualStereo.Dsp
 
         // 分频点（对数分布默认）与每带图案参数（元素级并发读写为良性竞争）
         public readonly float[] Freqs = { 125f, 350f, 1000f, 3000f, 10000f };
-        public readonly float[] W = { 0f, 0f, 0f, 0f, 0f, 0f };  // 权重
-        public readonly float[] P = { 1f, 1f, 1f, 1f, 1f, 1f };  // 锐度
+        public readonly float[] W = { 0f, 0f, 0f, 0f, 0f, 0f };  // 权重（偶极子系）
+        public readonly float[] P = { 1f, 1f, 1f, 1f, 1f, 1f };  // 锐度（锥外衰减速度 / 偶极图案指数）
+        // 锥角（半角，度）——锥形族：θ≤锥角满电平，180=全向。默认 LF 宽 HF 窄的自然收束
+        public readonly float[] Ang = { 120f, 110f, 100f, 90f, 80f, 70f };
 
         private readonly float[] _g = new float[Bands]; // 音频线程 scratch（单线程使用）
 
@@ -122,8 +125,9 @@ namespace VirtualStereo.Dsp
             {
                 float ang = 180f - r * angStep;
                 float cosT = (float)Math.Cos(ang * Math.PI / 180.0);
+                double theta = Math.Abs(ang); // 自身坐标系：θ=离轴角
                 for (int i = 0; i < Bands; i++)
-                    _gProbe[i] = Pattern(W[i], P[i], cosT);
+                    _gProbe[i] = PatternAt(i, cosT, theta);
 
                 for (int c = 0; c < cols; c++)
                 {
@@ -199,13 +203,24 @@ namespace VirtualStereo.Dsp
             GainsInto(srcAzDeg, srcElDeg, aimMode, aimAz, aimEl, dst);
         }
 
-        /// <summary>按端点渐变填充各带 (w, p)：i/(Bands-1) 线性插值（"更均匀"的省事做法）。</summary>
+        /// <summary>按端点渐变填充各带 (w, p)：i/(Bands-1) 线性插值（偶极子族用）。</summary>
         public void FillGradient(float wLow, float pLow, float wHigh, float pHigh)
         {
             for (int i = 0; i < Bands; i++)
             {
                 float t = (float)i / (Bands - 1);
                 W[i] = wLow + (wHigh - wLow) * t;
+                P[i] = pLow + (pHigh - pLow) * t;
+            }
+        }
+
+        /// <summary>按端点渐变填充锥形参数（锥角 + 锐度）。</summary>
+        public void FillGradientAngle(float aLow, float pLow, float aHigh, float pHigh)
+        {
+            for (int i = 0; i < Bands; i++)
+            {
+                float t = (float)i / (Bands - 1);
+                Ang[i] = aLow + (aHigh - aLow) * t;
                 P[i] = pLow + (pHigh - pLow) * t;
             }
         }
@@ -218,26 +233,31 @@ namespace VirtualStereo.Dsp
             float cosT = ax * -dx + ay * -dy + az * -dz;
             if (cosT > 1f) cosT = 1f;
             if (cosT < -1f) cosT = -1f;
+            double theta = Math.Acos(cosT) * (180.0 / Math.PI); // 0..180°
             for (int i = 0; i < Bands; i++)
-                dst[i] = Pattern(W[i], P[i], cosT);
+                dst[i] = PatternAt(i, cosT, theta);
         }
 
-        /// <summary>图案（Family 选择）：
-        /// 锥形族 g = (1−w) + w·((1+cosθ)/2)^p——单调、背面= (1−w) 底板、不回升（音箱）；
-        /// 偶极子系 g = |(1−w)+w·cosθ|^p（Steam Audio 加权偶极子，麦式——w>0.5 时 90° 后回升）。
-        /// w=0 恒为 1（全向）。</summary>
-        private float Pattern(float w, float p, float cosTheta)
+        /// <summary>单带图案（按 Family 分支）。thetaDeg ∈ [0,180]，cosT 供偶极子族用。</summary>
+        private float PatternAt(int band, float cosT, double thetaDeg)
         {
-            if (w <= 0f) return 1f;
             if (Family == 1)
             {
-                float base_ = (1f - w) + w * cosTheta;
+                float w = W[band];
+                if (w <= 0f) return 1f;
+                float base_ = (1f - w) + w * cosT;
                 float v = base_ < 0f ? -base_ : base_;
-                return (float)Math.Pow(v, p);
+                return (float)Math.Pow(v, P[band]);
             }
-            // 锥形：全向与 cos^p 半角瓣的幅度混合——两项都非负且单调，无绝对值折回
-            float lobe = (float)Math.Pow((1f + cosTheta) * 0.5, p);
-            return (1f - w) + w * lobe;
+            return ConeGain(Ang[band], P[band], thetaDeg);
+        }
+
+        /// <summary>锥形：半角内满电平；锥外 (α/θ)^s——连续单调、每倍角 −6×s dB、背面不回升。</summary>
+        private static float ConeGain(float halfAngleDeg, float slope, double thetaDeg)
+        {
+            float alpha = halfAngleDeg < 1f ? 1f : halfAngleDeg;
+            if (thetaDeg <= alpha) return 1f;
+            return (float)Math.Pow(alpha / thetaDeg, slope);
         }
 
         private static void GetAim(int aimMode, float aimAz, float aimEl,

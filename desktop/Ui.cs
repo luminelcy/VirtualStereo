@@ -605,6 +605,7 @@ namespace VirtualStereo.Desktop
         // ───────────────────────── 音箱设置面板（分频指向性） ─────────────────────────
 
         private static float _genLW = 0f, _genLP = 1f, _genHW = 0.9f, _genHP = 2f;
+        private static float _genLA = 140f, _genHA = 45f; // 锥形族端点（锥角）
 
         private static void DrawSpeakersPanel(DesktopApp app)
         {
@@ -619,13 +620,23 @@ namespace VirtualStereo.Desktop
             {
                 bool flatAim = app.AimModeL == 0 && app.AimModeR == 0;
                 bool omni = true;
-                for (int i = 0; i < DirectivityProcessor.Bands; i++)
-                    if (d.W[i] > 0.001f) omni = false;
+                if (d.Family == 0)
+                {
+                    for (int i = 0; i < DirectivityProcessor.Bands; i++)
+                        if (d.Ang[i] < 175f) omni = false;
+                }
+                else
+                {
+                    for (int i = 0; i < DirectivityProcessor.Bands; i++)
+                        if (d.W[i] > 0.001f) omni = false;
+                }
                 var warn = new System.Numerics.Vector4(1f, 0.75f, 0.2f, 1f);
                 if (flatAim)
                     ImGui.TextColored(warn, "提示: 两源均朝向听者 -> 离轴角恒 0 -> 响应平直，听不出效果");
                 else if (omni)
-                    ImGui.TextColored(warn, "提示: 权重全为 0（全向）-> 无指向性效果");
+                    ImGui.TextColored(warn, d.Family == 0
+                        ? "提示: 锥角全 180°（全向）-> 无指向性效果"
+                        : "提示: 权重全为 0（全向）-> 无指向性效果");
             }
 
             // 6 带 / 5 分频点
@@ -646,41 +657,85 @@ namespace VirtualStereo.Desktop
             ImGui.SameLine();
             if (ImGui.RadioButton("偶极子系（心形/8字，麦）##fam", ref fam, 1)) d.Family = 1;
             ImGui.Text(d.Family == 0
-                ? "分带图案（锥形族）  权重: 0=全向 -> 1=纯锥（背面压到 1−w 底板）   锐度: 越大锥越窄"
+                ? "锥角:半角（内部满电平，180°=全向，图上锥宽=±锥角）   锐度:锥外衰减速度，每倍角 −6×锐度 dB"
                 : "分带图案（偶极子系）  权重: 0=全向 0.5=心形 1=8字   锐度: 越大越窄（w>0.5 时 90° 后会回升）");
+            if (d.Family == 0)
+                ImGui.TextDisabled("强指向性: 锥角10° + 锐度6 -> 90° 处约 −114dB；渐变生成器/预设 一键铺带");
             for (int i = 0; i < DirectivityProcessor.Bands; i++)
-                BandRow(BandLabel(d, i), d.W, d.P, i);
+                BandRow(BandLabel(d, i), d, i);
 
-            // 渐变生成器：定两端、一键均匀插值（"更均匀"的省事做法）
+            // 渐变生成器：定两端、一键均匀插值（按图案族切语义）
             ImGui.Spacing();
-            ImGui.Text("渐变生成器（定两端，一键插值 6 带）");
-            ImGui.SetNextItemWidth(140);
-            ImGui.SliderFloat("低频端 权重", ref _genLW, 0f, 1f, "%.2f");
-            ImGui.SameLine();
-            ImGui.SetNextItemWidth(140);
-            ImGui.SliderFloat("低频端 锐度", ref _genLP, 0.3f, 4f, "%.1f");
-            ImGui.SetNextItemWidth(140);
-            ImGui.SliderFloat("高频端 权重", ref _genHW, 0f, 1f, "%.2f");
-            ImGui.SameLine();
-            ImGui.SetNextItemWidth(140);
-            ImGui.SliderFloat("高频端 锐度", ref _genHP, 0.3f, 4f, "%.1f");
-            if (ImGui.Button("按端点渐变填充"))
-                d.FillGradient(_genLW, _genLP, _genHW, _genHP);
+            if (d.Family == 0)
+            {
+                ImGui.Text("渐变生成器（定两端，一键插值 6 带）——锥形");
+                ImGui.SetNextItemWidth(140);
+                ImGui.SliderFloat("低频端 锥角", ref _genLA, 5f, 180f, "%.0f°");
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(140);
+                ImGui.SliderFloat("低频端 锐度", ref _genLP, 0.3f, 12f, "%.1f");
+                ImGui.SetNextItemWidth(140);
+                ImGui.SliderFloat("高频端 锥角", ref _genHA, 5f, 180f, "%.0f°");
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(140);
+                ImGui.SliderFloat("高频端 锐度", ref _genHP, 0.3f, 12f, "%.1f");
+                if (ImGui.Button("按端点渐变填充"))
+                    d.FillGradientAngle(_genLA, _genLP, _genHA, _genHP);
+            }
+            else
+            {
+                ImGui.Text("渐变生成器（定两端，一键插值 6 带）");
+                ImGui.SetNextItemWidth(140);
+                ImGui.SliderFloat("低频端 权重", ref _genLW, 0f, 1f, "%.2f");
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(140);
+                ImGui.SliderFloat("低频端 锐度", ref _genLP, 0.3f, 4f, "%.1f");
+                ImGui.SetNextItemWidth(140);
+                ImGui.SliderFloat("高频端 权重", ref _genHW, 0f, 1f, "%.2f");
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(140);
+                ImGui.SliderFloat("高频端 锐度", ref _genHP, 0.3f, 4f, "%.1f");
+                if (ImGui.Button("按端点渐变填充"))
+                    d.FillGradient(_genLW, _genLP, _genHW, _genHP);
+            }
 
             ImGui.Spacing();
             if (ImGui.Button("预设 全向"))
             {
-                for (int i = 0; i < DirectivityProcessor.Bands; i++) { d.W[i] = 0f; d.P[i] = 1f; }
+                if (d.Family == 0)
+                {
+                    for (int i = 0; i < DirectivityProcessor.Bands; i++) { d.Ang[i] = 180f; d.P[i] = 1f; }
+                }
+                else
+                {
+                    for (int i = 0; i < DirectivityProcessor.Bands; i++) { d.W[i] = 0f; d.P[i] = 1f; }
+                }
             }
             ImGui.SameLine();
             if (ImGui.Button("预设 中等指向"))
             {
-                for (int i = 0; i < DirectivityProcessor.Bands; i++) { d.W[i] = 0.5f; d.P[i] = 1f; }
+                if (d.Family == 0)
+                {
+                    for (int i = 0; i < DirectivityProcessor.Bands; i++) { d.Ang[i] = 90f; d.P[i] = 1f; }
+                }
+                else
+                {
+                    for (int i = 0; i < DirectivityProcessor.Bands; i++) { d.W[i] = 0.5f; d.P[i] = 1f; }
+                }
             }
             ImGui.SameLine();
             if (ImGui.Button("预设 高频聚拢"))
             {
-                d.FillGradient(0f, 1f, 0.9f, 2f);
+                if (d.Family == 0)
+                    d.FillGradientAngle(180f, 1f, 45f, 2f);
+                else
+                    d.FillGradient(0f, 1f, 0.9f, 2f);
+            }
+            if (d.Family == 0)
+            {
+                ImGui.SameLine();
+                if (ImGui.Button("预设 强指向 10°"))
+                    d.FillGradientAngle(140f, 1f, 10f, 6f); // LF 宽 -> HF 锐利10°锥
             }
 
             // 朝向在「空间模拟」面板（几何归几何，图案归图案）
@@ -869,13 +924,33 @@ namespace VirtualStereo.Desktop
             return d.Freqs[i - 1].ToString("F0") + "-" + d.Freqs[i].ToString("F0") + "Hz";
         }
 
-        private static void BandRow(string label, float[] w, float[] p, int band)
+        private static void BandRow(string label, DirectivityProcessor d, int band)
         {
             ImGui.SetNextItemWidth(150);
-            ImGui.SliderFloat(label + " 权重##w" + band, ref w[band], 0f, 1f, "%.2f");
-            ImGui.SameLine();
-            ImGui.SetNextItemWidth(150);
-            ImGui.SliderFloat(label + " 锐度##p" + band, ref p[band], 0.3f, 4f, "%.1f");
+            if (d.Family == 0)
+            {
+                // 锥形族：锥角（半角，对数滑条——10° 这种超强指向也好调）+ 锐度
+                float a = d.Ang[band];
+                if (ImGui.SliderFloat(label + " 锥角##a" + band, ref a, 5f, 180f, "%.0f°",
+                        ImGuiSliderFlags.Logarithmic))
+                    d.Ang[band] = a;
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(150);
+                float s = d.P[band];
+                if (ImGui.SliderFloat(label + " 锐度##p" + band, ref s, 0.3f, 12f, "%.1f"))
+                    d.P[band] = s;
+            }
+            else
+            {
+                float w = d.W[band];
+                if (ImGui.SliderFloat(label + " 权重##w" + band, ref w, 0f, 1f, "%.2f"))
+                    d.W[band] = w;
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(150);
+                float p = d.P[band];
+                if (ImGui.SliderFloat(label + " 锐度##p" + band, ref p, 0.3f, 4f, "%.1f"))
+                    d.P[band] = p;
+            }
         }
 
         // ───────────────────────── 两耳分析面板（波形 / 频谱） ─────────────────────────
