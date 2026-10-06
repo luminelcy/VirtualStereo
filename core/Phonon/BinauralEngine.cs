@@ -21,6 +21,10 @@ namespace VirtualStereo.Phonon
         public static bool Initialized { get; private set; }
         public static string LastError { get; private set; } = "";
 
+        // 线程模型：mod 里 Process 跑在**音频线程**，Init/LoadSofa/SetInterpolation 在控制线程。
+        // Steam Audio 的 context/effect 不是线程安全的，这里用一把锁把两者隔开。
+        private static readonly object _gate = new object();
+
         private static IntPtr _context;
         private static IntPtr _hrtf;
         private static readonly IntPtr[] _effects = new IntPtr[SourceCount];
@@ -54,97 +58,109 @@ namespace VirtualStereo.Phonon
         /// <summary>设置左右两个虚拟声源的方向（头坐标系单位向量）。</summary>
         public static void SetDirections(SaiVector3 left, SaiVector3 right)
         {
-            _dirs[0] = ToNative(left);
-            _dirs[1] = ToNative(right);
-        }
+            lock (_gate)
+            {
+                _dirs[0] = ToNative(left);
+                _dirs[1] = ToNative(right);
+        
+            }}
 
         /// <summary>初始化上下文 / HRTF / 两个双耳 effect。已初始化则直接返回 true。</summary>
         public static bool Init(int sampleRate, int frameSize)
         {
-            if (Initialized) return true;
-            if (sampleRate <= 0 || frameSize <= 0)
+            lock (_gate)
             {
-                LastError = "双耳引擎参数非法";
-                return false;
-            }
-
-            try
-            {
-                var ctxSettings = new SaiContextSettings
+                if (Initialized) return true;
+                if (sampleRate <= 0 || frameSize <= 0)
                 {
-                    Version = PhononNative.SteamAudioVersion,
-                    SimdLevel = 0, // IPL_SIMDLEVEL_SSE2
-                };
-                int err = PhononNative.iplContextCreate(ref ctxSettings, out _context);
-                if (err != PhononNative.StatusSuccess)
-                    return Fail("iplContextCreate", err);
-
-                _rate = sampleRate;
-                _frames = frameSize;
-                var audio = new SaiAudioSettings { SamplingRate = sampleRate, FrameSize = frameSize };
-
-                if (!CreateHrtf(null, ref audio)) return false;
-                if (!CreateEffects(ref audio)) return false;
-
-                _inData = Marshal.AllocHGlobal(frameSize * sizeof(float));
-                _inPtr = Marshal.AllocHGlobal(IntPtr.Size);
-                Marshal.WriteIntPtr(_inPtr, _inData);
-                _in = new SaiAudioBuffer { NumChannels = 1, NumSamples = frameSize, Data = _inPtr };
-
-                err = PhononNative.iplAudioBufferAllocate(_context, 2, frameSize, out _out);
-                if (err != PhononNative.StatusSuccess)
-                    return Fail("iplAudioBufferAllocate", err);
-
-                _tmp0 = new float[frameSize];
-                _tmp1 = new float[frameSize];
-                _peakPtr = Marshal.AllocHGlobal(2 * sizeof(float));
-                for (int s = 0; s < SourceCount; s++)
-                {
-                    _hist[s] = new float[HistLen];
-                    _histW[s] = 0;
+                    LastError = "双耳引擎参数非法";
+                    return false;
                 }
-                ResetDspState();
 
-                Initialized = true;
-                LastError = "";
-                return true;
-            }
-            catch (Exception e)
-            {
-                LastError = "双耳引擎初始化异常: " + e.Message;
-                Shutdown();
-                return false;
-            }
-        }
+                try
+                {
+                    var ctxSettings = new SaiContextSettings
+                    {
+                        Version = PhononNative.SteamAudioVersion,
+                        SimdLevel = 0, // IPL_SIMDLEVEL_SSE2
+                    };
+                    int err = PhononNative.iplContextCreate(ref ctxSettings, out _context);
+                    if (err != PhononNative.StatusSuccess)
+                        return Fail("iplContextCreate", err);
+
+                    _rate = sampleRate;
+                    _frames = frameSize;
+                    var audio = new SaiAudioSettings { SamplingRate = sampleRate, FrameSize = frameSize };
+
+                    if (!CreateHrtf(null, ref audio)) return false;
+                    if (!CreateEffects(ref audio)) return false;
+
+                    _inData = Marshal.AllocHGlobal(frameSize * sizeof(float));
+                    _inPtr = Marshal.AllocHGlobal(IntPtr.Size);
+                    Marshal.WriteIntPtr(_inPtr, _inData);
+                    _in = new SaiAudioBuffer { NumChannels = 1, NumSamples = frameSize, Data = _inPtr };
+
+                    err = PhononNative.iplAudioBufferAllocate(_context, 2, frameSize, out _out);
+                    if (err != PhononNative.StatusSuccess)
+                        return Fail("iplAudioBufferAllocate", err);
+
+                    _tmp0 = new float[frameSize];
+                    _tmp1 = new float[frameSize];
+                    _peakPtr = Marshal.AllocHGlobal(2 * sizeof(float));
+                    for (int s = 0; s < SourceCount; s++)
+                    {
+                        _hist[s] = new float[HistLen];
+                        _histW[s] = 0;
+                    }
+                    ResetDspState();
+
+                    Initialized = true;
+                    LastError = "";
+                    return true;
+                }
+                catch (Exception e)
+                {
+                    LastError = "双耳引擎初始化异常: " + e.Message;
+                    Shutdown();
+                    return false;
+                }
+        
+            }}
 
         /// <summary>0 = 最近邻 / 1 = 双线性。</summary>
         public static void SetInterpolation(int mode)
         {
-            _interp = mode == PhononNative.InterpolationNearest
-                ? SaiInterpolation.Nearest
-                : SaiInterpolation.Bilinear;
-        }
+            lock (_gate)
+            {
+                _interp = mode == PhononNative.InterpolationNearest
+                    ? SaiInterpolation.Nearest
+                    : SaiInterpolation.Bilinear;
+        
+            }}
 
         /// <summary>载入 SOFA 自定义 HRTF（null/空 = 回到内置 HRTF）。失败不影响当前 HRTF。</summary>
         public static bool LoadSofa(string path)
         {
-            if (!Initialized)
+            lock (_gate)
             {
-                LastError = "双耳引擎尚未初始化";
-                return false;
-            }
+                if (!Initialized)
+                {
+                    LastError = "双耳引擎尚未初始化";
+                    return false;
+                }
 
-            var audio = new SaiAudioSettings { SamplingRate = _rate, FrameSize = _frames };
-            if (!CreateHrtf(string.IsNullOrEmpty(path) ? null : path, ref audio)) return false;
+                var audio = new SaiAudioSettings { SamplingRate = _rate, FrameSize = _frames };
+                if (!CreateHrtf(string.IsNullOrEmpty(path) ? null : path, ref audio)) return false;
 
-            // effect 创建时绑了 HRTF，换 HRTF 后一并重建
-            ReleaseEffects();
-            if (!CreateEffects(ref audio)) return false;
+                // effect 创建时绑了 HRTF，换 HRTF 后一并重建
+                ReleaseEffects();
+                if (!CreateEffects(ref audio)) return false;
 
-            ResetDspState();
-            LastError = "";
-            return true;
-        }
+                ResetDspState();
+                LastError = "";
+                return true;
+        
+            }}
 
         /// <summary>
         /// 双耳渲染：左侧声源 left[] 与右侧声源 right[] 各按自己的方向渲染，
@@ -153,43 +169,49 @@ namespace VirtualStereo.Phonon
         /// </summary>
         public static void Process(float[] left, float[] right, float[] stereo, int frames, SaiMode mode)
         {
-            Array.Clear(stereo, 0, frames * 2);
-
-            if (!Initialized || frames <= 0 || frames > _frames)
+            lock (_gate)
             {
-                Fallback(left, stereo, frames);
-                Fallback(right, stereo, frames);
-                return;
-            }
+                Array.Clear(stereo, 0, frames * 2);
 
-            ProcessSource(0, left, stereo, frames, mode);
-            ProcessSource(1, right, stereo, frames, mode);
-        }
+                if (!Initialized || frames <= 0 || frames > _frames)
+                {
+                    Fallback(left, stereo, frames);
+                    Fallback(right, stereo, frames);
+                    return;
+                }
+
+                ProcessSource(0, left, stereo, frames, mode);
+                ProcessSource(1, right, stereo, frames, mode);
+        
+            }}
 
         /// <summary>释放全部原生资源。</summary>
         public static void Shutdown()
         {
-            try
+            lock (_gate)
             {
-                ReleaseEffects();
-                if (_context != IntPtr.Zero && _out.Data != IntPtr.Zero)
-                    PhononNative.iplAudioBufferFree(_context, ref _out);
-            }
-            catch { }
+                try
+                {
+                    ReleaseEffects();
+                    if (_context != IntPtr.Zero && _out.Data != IntPtr.Zero)
+                        PhononNative.iplAudioBufferFree(_context, ref _out);
+                }
+                catch { }
 
-            _out = default;
-            _in = default;
-            if (_inData != IntPtr.Zero) { Marshal.FreeHGlobal(_inData); _inData = IntPtr.Zero; }
-            if (_inPtr != IntPtr.Zero) { Marshal.FreeHGlobal(_inPtr); _inPtr = IntPtr.Zero; }
-            if (_peakPtr != IntPtr.Zero) { Marshal.FreeHGlobal(_peakPtr); _peakPtr = IntPtr.Zero; }
+                _out = default;
+                _in = default;
+                if (_inData != IntPtr.Zero) { Marshal.FreeHGlobal(_inData); _inData = IntPtr.Zero; }
+                if (_inPtr != IntPtr.Zero) { Marshal.FreeHGlobal(_inPtr); _inPtr = IntPtr.Zero; }
+                if (_peakPtr != IntPtr.Zero) { Marshal.FreeHGlobal(_peakPtr); _peakPtr = IntPtr.Zero; }
 
-            if (_hrtf != IntPtr.Zero) PhononNative.iplHRTFRelease(ref _hrtf);
-            if (_context != IntPtr.Zero) PhononNative.iplContextRelease(ref _context);
+                if (_hrtf != IntPtr.Zero) PhononNative.iplHRTFRelease(ref _hrtf);
+                if (_context != IntPtr.Zero) PhononNative.iplContextRelease(ref _context);
 
-            for (int s = 0; s < SourceCount; s++) _hist[s] = null;
-            ResetDspState();
-            Initialized = false;
-        }
+                for (int s = 0; s < SourceCount; s++) _hist[s] = null;
+                ResetDspState();
+                Initialized = false;
+        
+            }}
 
         // ---------------------------------------------------------------- 内部
 

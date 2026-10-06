@@ -3,6 +3,7 @@
 //   1) OnAudioFilterRead（低延迟，注入组件的 Unity 音频回调）
 //   2) AudioClip 流式 SetData（回调不触发时的兜底，由 Core.OnUpdate 泵）
 using System;
+using System.Threading;
 using MelonLoader;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -19,13 +20,43 @@ namespace VirtualStereo
         private static readonly string[] ScreenIds = { "02624", "02625", "02626", "02627", "02628" };
 
         private static ProcessLoopbackCapture _capture;
-        // L/R 只是"虚拟声源位置"载体（标记球/朝向箭头挂它们下面），不挂 AudioSource——
-        // 出声的是听者附近那个 2D 立体声源（双耳渲染结果）。原来对照实验用的
-        // 双音箱直通 / ITD+ILD 两条路径已删除，mod 只保留 HRTF。
+        // L/R 只是"虚拟声源位置"载体（标记球/朝向箭头挂它们下面），不挂 AudioSource。
+        // 出声不走 Unity：由 core/AudioCapture/WasapiOutput.cs 在音频线程里直接写声卡。
         private static GameObject _goL, _goR;
-        private static long _startedAt;
-        private static int _writePos;
         private static Transform _screen;
+
+        // ── 音频线程（不走 Unity 音频；节奏由声卡决定，与游戏帧率解耦）──
+        private const int Block = 1024;                      // DSP 块长（48k 下 21.3ms）
+        private static readonly float[] _blockL = new float[Block];
+        private static readonly float[] _blockR = new float[Block];
+        private static readonly float[] _blockStereo = new float[Block * 2];
+        private static WasapiOutput _out;
+        private static Thread _audioThread;
+        private static volatile bool _audioRunning;
+        private static bool _audioStarved = true;
+        private const int RoomTailMs = 600;
+
+        // ── 主线程写、音频线程读的空间快照（Unity 的 Transform 只能在主线程读）──
+        private static readonly SaiVector3[] _snapDir = new SaiVector3[2];
+        private static float _snapAzL, _snapElL, _snapDistL;
+        private static float _snapAzR, _snapElR, _snapDistR;
+        private static int _snapAimL = 3, _snapAimR = 3;
+        private static float _snapAimAzL, _snapAimElL, _snapAimAzR, _snapAimElR;
+
+        /// <summary>读门槛（毫秒）：环电平掉到「低」以下出静音保护，回到「高」以上才恢复读。</summary>
+        public static int PreRollLowMs { get; set; } = 10;
+        public static int PreRollHighMs { get; set; } = 25;
+
+        /// <summary>采集环当前电平（毫秒）。</summary>
+        public static int CaptureBufferMs { get; private set; }
+
+        /// <summary>设备缓冲已排队的深度（毫秒）。</summary>
+        public static int OutFillMs { get; private set; }
+
+        /// <summary>设备侧欠载次数（写不进去的次数）。</summary>
+        public static int OutUnderruns => _out != null ? _out.Underruns : 0;
+
+        private static int _lastLoggedUnderruns;
 
         /// <summary>屏幕正面朝向 = 面板自身局部 +Y 的方向（房间物品的安装面法线朝外）。
         /// **完全不看听者位置**：人站在哪、绕到屏幕哪一侧，都改变不了屏幕的朝向。
@@ -278,21 +309,6 @@ namespace VirtualStereo
         // 读门槛用迟滞（欠载后等 25ms 才恢复读，掉到 10ms 以下出静音），
         // 替代旧的固定 125ms——那是"暂停/跳转多久才响应"的主体。
 
-        /// <summary>渲染前置（毫秒）：写指针领先播放头的量 = 听到的声音至少滞后这么多。
-        /// 主线程按帧泵 1024 采样块（48k 下 21ms/块），60ms ≈ 3 块余量；
-        /// 调太小会在掉帧时欠载（出咔哒）。</summary>
-        public static int RenderLeadMs { get; set; } = 60;
-
-        /// <summary>最近的环电平（毫秒，取 L/R 较小者），面板诊断用。</summary>
-        public static int RingLevelMs { get; private set; }
-
-        /// <summary>最近的渲染前置实测值（毫秒，仅 SetData 兜底路径有意义）。</summary>
-        public static int LeadMs { get; private set; }
-
-        /// <summary>欠载次数（播放头追到写指针 → 跳转 + 清零）。调前置大小时看它。</summary>
-        public static int Underruns { get; private set; }
-
-        private static bool _pumpStarved = true;  // SetData 泵路径的读门槛迟滞态
         private static long _nextListenerScanAt;  // AudioListener 是整场扫描，别每帧找
 
         /// <summary>听音室：一次反射 + FDN 混响尾（只在双耳模式下有输出缓冲可用）。</summary>
@@ -491,21 +507,14 @@ namespace VirtualStereo
             }
         }
 
-        private static GameObject _goB;
-        private static AudioSource _srcB;
-        private static AudioClip _clipB;
-        private static readonly float[] _blockStereo = new float[Block * 2];
-
         public static void SetInterpolation(int interpolation)
         {
             Interpolation = interpolation;
             BinauralEngine.SetInterpolation(interpolation);
         }
 
-        /// <summary>双耳引擎是否已经就绪（Core 只在这里为真时才去压原声音量）。</summary>
-        public static bool HrtfReady => BinauralEngine.Initialized;
-
-        public static bool SourcesAlive => _srcB != null;
+        /// <summary>双耳引擎 + 音频线程都就绪（Core 只在这里为真时才去压原声音量）。</summary>
+        public static bool HrtfReady => BinauralEngine.Initialized && _audioRunning && _out != null;
 
         // ── 调试：手动坐标模式 + 标记球 ──
         private static bool _manualMode;
@@ -681,31 +690,30 @@ namespace VirtualStereo
         public static void AttachCapture(ProcessLoopbackCapture capture)
         {
             _capture = capture;
-            _startedAt = NowMs;
-            _writePos = 0;
-            _samplesDue = 0;
-            _lastPumpAt = 0;
+            StartAudio();
         }
 
         public static void DetachCapture()
         {
+            StopAudio();
             StopSources();
             _capture = null;
         }
 
-        /// <summary>每帧泵：模式切换、SetData 兜底、空间位置刷新、统计。</summary>
+        /// <summary>主线程每帧：位置载体、标记/箭头、空间快照、统计。
+        /// **音频不再经过 Unity**——DSP 与播放都在自己的线程上（见 StartAudio/DspLoop）。</summary>
         public static void Tick()
         {
             if (_capture == null) return;
             long now = NowMs;
 
-            if (!SourcesAlive)
+            if (_goL == null || _goR == null)
             {
-                if (!CreateSources()) return;
+                if (!CreateCarriers()) return;
             }
 
             EnsureMarkers();
-            PumpSetData();
+            SnapshotSpatial();
 
             if (now >= _nextSpatialAt)
             {
@@ -716,6 +724,14 @@ namespace VirtualStereo
             if (now >= _nextStatAt)
             {
                 _nextStatAt = now + 10000;
+                // 设备侧欠载只在"有变化"时打一条：日志里就能看到发生时间与当时的缓冲状态
+                if (_out != null && _out.Underruns != _lastLoggedUnderruns)
+                {
+                    MelonLogger.Msg($"[VirtualStereo] 设备欠载累计 {_out.Underruns}" +
+                        $"（本次 +{_out.Underruns - _lastLoggedUnderruns}）" +
+                        $"采集环 {CaptureBufferMs}ms 设备缓冲 {OutFillMs}ms");
+                    _lastLoggedUnderruns = _out.Underruns;
+                }
                 var listener = Object.FindObjectOfType<AudioListener>();
                 string lp = listener != null ? $"{listener.transform.position.x:F1},{listener.transform.position.y:F1},{listener.transform.position.z:F1}" : "无";
                 string lPos = _goL != null ? $"{_goL.transform.position.x:F1},{_goL.transform.position.y:F1},{_goL.transform.position.z:F1}" : "-";
@@ -731,7 +747,8 @@ namespace VirtualStereo
             }
         }
 
-        private static bool CreateSources()
+        /// <summary>只建两个位置载体（标记球/朝向箭头挂它们下面），不再建任何 AudioSource。</summary>
+        private static bool CreateCarriers()
         {
             try
             {
@@ -739,225 +756,241 @@ namespace VirtualStereo
                 _goR = new GameObject("VirtualStereo_R");
                 Object.DontDestroyOnLoad(_goL);
                 Object.DontDestroyOnLoad(_goR);
-
-                int rate = _capture != null && _capture.SampleRate > 0 ? _capture.SampleRate : 48000;
-                if (!BinauralEngine.Initialized && !BinauralEngine.Init(rate, Block))
-                {
-                    // 没有对照模式可退：引擎起不来就什么也不做，让游戏保持原声，
-                    // 下一帧继续重试（比如 phonon.dll 还没放好）。
-                    MelonLogger.Error("[VirtualStereo] 双耳引擎不可用，保持游戏原声: " + BinauralEngine.LastError);
-                    Object.Destroy(_goL);
-                    Object.Destroy(_goR);
-                    _goL = _goR = null;
-                    return false;
-                }
-
-                BinauralEngine.SetInterpolation(Interpolation);
-                _goB = new GameObject("VirtualStereo_Binaural");
-                Object.DontDestroyOnLoad(_goB);
-                _srcB = _goB.AddComponent<AudioSource>();
-                _srcB.playOnAwake = false;
-                _srcB.spatialBlend = 0f;
-                _srcB.dopplerLevel = 0f;
-                _srcB.priority = 48;
-                _srcB.volume = 1f;
-                _clipB = AudioClip.Create("vs_binaural", 96 * Block, 2, rate, false);
-                _writePos = rate * RenderLeadMs / 1000;
-                _srcB.clip = _clipB;
-                _srcB.loop = true;
-                _srcB.Play();
                 return true;
             }
             catch (Exception e)
             {
-                MelonLogger.Error("[VirtualStereo] 创建音频源失败: " + e);
-                StopSources();
+                MelonLogger.Error("[VirtualStereo] 创建位置载体失败: " + e);
                 return false;
             }
         }
+        // ───────────────────────── 音频线程：采集 → DSP → 自己的 WASAPI 输出 ─────────────────────────
+        // 主线程只做 Unity 侧的事（位置载体、标记/箭头、相机快照、统计）；
+        // 音频线程读快照做 DSP，节奏由**声卡**决定：设备缓冲有空位就产出一块。
+        // 这样音频实时性彻底不受游戏帧率影响（原来主线程 SetData 喂环形 clip 的做法，
+        // 帧率一掉就欠载、音频结束时更严重）。
 
-        private static double _samplesDue;
-        private static long _lastPumpAt;
-        private const int Block = 1024;
-        private static readonly float[] _blockL = new float[Block];
-        private static readonly float[] _blockR = new float[Block];
-
-        private static void PumpSetData()
+        /// <summary>主线程每帧：把 Unity 侧的位置/朝向算成纯数据快照，供音频线程使用。</summary>
+        private static void SnapshotSpatial()
         {
-            if (_capture == null || _clipB == null) return;
-
-            int rate = _capture.SampleRate > 0 ? _capture.SampleRate : 48000;
-
-            // 按流逝时间写入（rate×dt 个样本/帧），再以固定 1024 块落盘——
-            // clip 长度是块的整数倍，绕回天然精确，SetData 永不越界
-            long now = NowMs;
-            if (_lastPumpAt == 0) _lastPumpAt = now;
-            double dt = (now - _lastPumpAt) / 1000.0;
-            _lastPumpAt = now;
-            if (dt > 0.25) dt = 0.25;
-            if (dt < 0) dt = 0;
-            _samplesDue += rate * dt;
-            // 积压上限 250ms：欠载/卡顿后**宁可丢内容**，也不要在一帧里补几百毫秒的 DSP
-            if (_samplesDue > rate / 4) _samplesDue = rate / 4;
-
-            // 溢出保险（捕获时钟快于播放时钟时会慢慢堆积）：超 500ms 砍回 250ms，
-            // 宁可一次内容跳跃，也不要常驻越来越大的延迟。
-            int lvl = _capture.RingL.Available < _capture.RingR.Available
-                ? _capture.RingL.Available : _capture.RingR.Available;
-            if (lvl > rate / 2)
+            // 找 AudioListener 是整场扫描，最多 2 秒一次（UpdateSpatial 也会兜底找）
+            if (_listener == null && NowMs >= _nextListenerScanAt)
             {
-                int drop = lvl - rate / 4;
-                _capture.RingL.Discard(drop);
-                _capture.RingR.Discard(drop);
-                lvl = rate / 4;
-            }
-            RingLevelMs = lvl * 1000 / Math.Max(1, rate);
-
-            // 读门槛（迟滞）：硬下限 10ms 出静音保护，回到 25ms 才恢复读
-            if (_pumpStarved)
-            {
-                if (lvl >= rate / 40) _pumpStarved = false;
-            }
-            else if (lvl < rate / 100)
-            {
-                _pumpStarved = true;
-            }
-            bool buffered = !_pumpStarved;
-
-            // 写指针自愈：只在**真的欠载**（播放头追到写指针）或领先过大时跳，
-            // 并且把从播放头到新写指针这段**清零**——不清的话播放头会读到上一圈
-            // 留下的旧内容，听感就是"切片乱跳"。
-            var playSrc = _srcB;
-            int clipLen = _clipB.samples;
-            int playFrame = playSrc.timeSamples;
-            int lead = (_writePos - playFrame + clipLen) % clipLen;
-            LeadMs = lead * 1000 / Math.Max(1, rate);
-            if (lead <= 0 || lead > clipLen / 2)
-            {
-                int leadSamples = rate * RenderLeadMs / 1000;
-                ZeroClipRange(playFrame, leadSamples, clipLen);
-                _writePos = (playFrame + leadSamples) % clipLen;
-                _samplesDue = 0; // 已经跳过了：积压的那段直接丢，别再补
-                Underruns++;
+                _nextListenerScanAt = NowMs + 2000;
+                var al = Object.FindObjectOfType<AudioListener>();
+                _listener = al != null ? al.transform : null;
             }
 
-            // 声源方位：方向（HRTF）、方位角/仰角（指向性与房间反射）、真实距离（距离衰减）都出自同一处
+            var pL = _goL != null ? _goL.transform.position : Vector3.zero;
+            var pR = _goR != null ? _goR.transform.position : Vector3.zero;
+            _snapDir[0] = HeadDir(pL);
+            _snapDir[1] = HeadDir(pR);
+
             float azL = 0f, elL = 0f, distL = RefDistM;
             float azR = 0f, elR = 0f, distR = RefDistM;
-            {
-                // 找 AudioListener 是整场扫描，最多 2 秒一次（UpdateSpatial 也会兜底找）
-                if (_listener == null && now >= _nextListenerScanAt)
-                {
-                    _nextListenerScanAt = now + 2000;
-                    var al = Object.FindObjectOfType<AudioListener>();
-                    _listener = al != null ? al.transform : null;
-                }
-                // 方向按当前虚拟声源位置 × 头部（相机）朝向换算到头坐标系
-                var pL = _goL != null ? _goL.transform.position : Vector3.zero;
-                var pR = _goR != null ? _goR.transform.position : Vector3.zero;
-                BinauralEngine.SetDirections(HeadDir(pL), HeadDir(pR));
-                if (_goL != null) HeadAzElDist(pL, out azL, out elL, out distL);
-                if (_goR != null) HeadAzElDist(pR, out azR, out elR, out distR);
+            if (_goL != null) HeadAzElDist(pL, out azL, out elL, out distL);
+            if (_goR != null) HeadAzElDist(pR, out azR, out elR, out distR);
+            _snapAzL = azL; _snapElL = elL; _snapDistL = distL;
+            _snapAzR = azR; _snapElR = elR; _snapDistR = distR;
 
-                if (_room.Enabled && RoomAutoFit)
+            // 朝向解析（「观众席」取屏幕自身法线，世界系固定）→ 换算成头坐标角度交给 DSP
+            ResolveAim(0, out int amL, out float aaL, out float aeL);
+            ResolveAim(1, out int amR, out float aaR, out float aeR);
+            _snapAimL = amL; _snapAimAzL = aaL; _snapAimElL = aeL;
+            _snapAimR = amR; _snapAimAzR = aaR; _snapAimElR = aeR;
+
+            if (_room.Enabled && RoomAutoFit)
+            {
+                float dMax = distL > distR ? distL : distR;
+                if (Math.Abs(dMax - _autoFitDist) > 0.3f)
                 {
-                    float dMax = distL > distR ? distL : distR;
-                    if (Math.Abs(dMax - _autoFitDist) > 0.3f)
-                    {
-                        _autoFitDist = dMax;
-                        AutoFitRoom(dMax);
-                    }
+                    _autoFitDist = dMax;
+                    AutoFitRoom(dMax);
                 }
             }
+        }
 
-            int blocks = 0;
-            float tickPeak = 0f;
+        /// <summary>打开输出设备 + 起音频线程；失败就报错并保持游戏原声（Core 只在 HrtfReady 时压原声）。</summary>
+        private static void StartAudio()
+        {
+            StopAudio();
+            if (_capture == null) return;
+
+            int rate = _capture.SampleRate > 0 ? _capture.SampleRate : 48000;
+            if (!BinauralEngine.Initialized && !BinauralEngine.Init(rate, Block))
+            {
+                MelonLogger.Error("[VirtualStereo] 双耳引擎不可用，保持游戏原声: " + BinauralEngine.LastError);
+                return;
+            }
+            BinauralEngine.SetInterpolation(Interpolation);
+
+            try
+            {
+                _out = WasapiOutput.Open(rate);
+            }
+            catch (Exception e)
+            {
+                MelonLogger.Error("[VirtualStereo] 打开输出设备失败，保持游戏原声: " + e.Message);
+                _out = null;
+                return;
+            }
+
+            _audioRunning = true;
+            _audioThread = new Thread(() => DspLoop(rate))
+            {
+                IsBackground = true,
+                Name = "VirtualStereo.Dsp",
+                Priority = System.Threading.ThreadPriority.AboveNormal,
+            };
+            _audioThread.Start();
+            MelonLogger.Msg($"[VirtualStereo] 音频线程已启动: {rate}Hz 块 {Block} 设备缓冲 {_out.BufferFrames} 帧" +
+                $"（约 {_out.BufferFrames * 1000 / Math.Max(1, rate)}ms）");
+        }
+
+        private static void StopAudio()
+        {
+            _audioRunning = false;
+            try { _audioThread?.Join(500); } catch { }
+            _audioThread = null;
+            try { _out?.Dispose(); } catch { }
+            _out = null;
+            CaptureBufferMs = 0;
+            OutFillMs = 0;
+        }
+
+        /// <summary>音频线程：设备-paced —— 设备缓冲有空位就产出一块。</summary>
+        private static void DspLoop(int rate)
+        {
             float gain = PreGainLinear;
-            // 单帧最多写 3 块（48k 下约 64ms）：卡顿时不至于在一帧里跑满 DSP 把帧率拖死
-            // 单帧最多写满"积压上限"那么多（≤250ms）。上限本身已经由上面的 clamp 保证，
-            // 这里不再额外收紧——收紧到低于实时消费速度会让缓冲持续堆积、反而丢内容。
-            while (_samplesDue >= Block && blocks < rate / 4 / Block)
+            long silentSince = 0;
+
+            while (_audioRunning)
             {
-                if (buffered)
+                try
                 {
-                    _capture.RingL.Read(_blockL, Block);
-                    _capture.RingR.Read(_blockR, Block);
-                }
-                else
-                {
-                    // 环电平低于 10ms：写静音（欠账照记，回到 25ms 后追平）
-                    Array.Clear(_blockL, 0, Block);
-                    Array.Clear(_blockR, 0, Block);
-                }
+                    if (_out == null) { Thread.Sleep(5); continue; }
+                    if (_out.FreeFrames <= 0) { Thread.Sleep(1); continue; } // 设备缓冲满：等声卡
 
-                // 前置增益：进空间化模拟之前的输入衰减
-                if (gain != 1f)
-                {
-                    for (int i = 0; i < Block; i++) { _blockL[i] *= gain; _blockR[i] *= gain; }
-                }
-
-                if (buffered)
-                {
-                    // 指向性：按"该声源朝哪"与"听者在该方向看它"的夹角分带着色（离轴才变色）
-                    if (_directivity.Enabled)
+                    // 采集环：溢出自愈（超 250ms 砍到 100ms）+ 读门槛迟滞
+                    int lvl = Math.Min(_capture.RingL.Available, _capture.RingR.Available);
+                    if (lvl > rate / 4)
                     {
-                        ResolveAim(0, out int amL, out float aaL, out float aeL);
-                        ResolveAim(1, out int amR, out float aaR, out float aeR);
-                        _directivity.Process(_dirStateL, _blockL, Block, rate,
-                            azL, elL, amL, aaL, aeL);
-                        _directivity.Process(_dirStateR, _blockR, Block, rate,
-                            azR, elR, amR, aaR, aeR);
+                        int drop = lvl - rate / 10;
+                        _capture.RingL.Discard(drop);
+                        _capture.RingR.Discard(drop);
+                        lvl = rate / 10;
+                    }
+                    CaptureBufferMs = lvl * 1000 / Math.Max(1, rate);
+
+                    int hi = rate * PreRollHighMs / 1000;
+                    int lo = rate * PreRollLowMs / 1000;
+                    if (_audioStarved)
+                    {
+                        if (lvl >= hi) _audioStarved = false;
+                    }
+                    else if (lvl < lo)
+                    {
+                        _audioStarved = true;
+                    }
+                    bool buffered = !_audioStarved;
+
+                    if (buffered)
+                    {
+                        _capture.RingL.Read(_blockL, Block);
+                        _capture.RingR.Read(_blockR, Block);
+                    }
+                    else
+                    {
+                        Array.Clear(_blockL, 0, Block);
+                        Array.Clear(_blockR, 0, Block);
                     }
 
-                    // 距离衰减：参考距离处 0dB、距离翻倍 −6dB（与桌面版同一套 1/r 律）
-                    if (DistanceOn)
+                    // 断流超过 RoomTailMs 就跳过房间处理（混响尾已衰完，没必要白烧 CPU）
+                    long now = NowMs;
+                    if (buffered) silentSince = 0;
+                    else if (silentSince == 0) silentSince = now;
+                    bool roomAlive = silentSince == 0 || now - silentSince <= RoomTailMs;
+
+                    ProcessBlock(rate, buffered, roomAlive, gain);
+
+                    // 把这一块按"设备能吃的粒度"推出去：设备缓冲可能比 Block 还小
+                    // （10ms 周期下可能只有 480 帧），所以不能要求一次写得下整块。
+                    int off = 0;
+                    while (off < Block && _audioRunning)
                     {
-                        float gl = RefDistM / Math.Max(0.3f, distL);
-                        float gr = RefDistM / Math.Max(0.3f, distR);
-                        if (gl != 1f) for (int i = 0; i < Block; i++) _blockL[i] *= gl;
-                        if (gr != 1f) for (int i = 0; i < Block; i++) _blockR[i] *= gr;
+                        int free = _out.FreeFrames;
+                        if (free <= 0) { Thread.Sleep(1); continue; }
+                        int n = Block - off;
+                        if (n > free) n = free;
+                        if (!_out.Write(_blockStereo, off, n)) break;
+                        off += n;
                     }
-
-                    BinauralEngine.Process(_blockL, _blockR, _blockStereo, Block, SaiMode.FullHrtf);
+                    OutFillMs = _out.FillFrames * 1000 / Math.Max(1, rate);
                 }
-                else
+                catch (Exception e)
                 {
-                    // 断流：直接出静音，别在静音上白跑 HRTF/指向性（房间照走，混响尾自然衰减）
-                    Array.Clear(_blockStereo, 0, Block * 2);
+                    MelonLogger.Error("[VirtualStereo] 音频线程异常: " + e.Message);
+                    Thread.Sleep(20);
                 }
-
-                // 听音室：一次反射（ITD/ILD + 材料频带吸收）+ 混响尾，累加到两耳（不清零）
-                if (_room.Enabled)
-                {
-                    // 房间几何用"电视挂在 2m 高"的假设：方位与水平距离取真实发声点，
-                    // 高度换成电视高度——反射路径因此是"墙上一台电视"的反射，
-                    // 而不是屏幕两侧那个真实仰角的反射。
-                    RoomAzElDist(azL, elL, distL, out float rAzL, out float rElL, out float rDistL);
-                    RoomAzElDist(azR, elR, distR, out float rAzR, out float rElR, out float rDistR);
-                    _room.Process(_blockL, _blockR, _blockStereo, Block, rate,
-                        rAzL, rElL, rDistL, rAzR, rElR, rDistR);
-                }
-
-                _clipB.SetData(_blockStereo, _writePos);
-                for (int i = 0; i < Block * 2; i++)
-                {
-                    float a = _blockStereo[i] < 0 ? -_blockStereo[i] : _blockStereo[i];
-                    if (a > tickPeak) tickPeak = a;
-                }
-                _writePos += Block;
-                if (_writePos >= clipLen) _writePos = 0;
-                _samplesDue -= Block;
-                blocks++;
             }
+        }
 
-            // 断流时把双耳声源静音：环形 AudioClip 仍在循环，但不让它把残留内容复读出来
-            if (_srcB != null)
+        /// <summary>一块的完整 DSP。只读主线程写好的空间快照，不做任何 Unity 调用。</summary>
+        private static void ProcessBlock(int rate, bool buffered, bool roomAlive, float gain)
+        {
+            float peak = 0f;
+
+            // 前置增益：进空间化模拟之前的输入衰减
+            if (gain != 1f)
             {
-                float want = _pumpStarved ? 0f : 1f;
-                if (_srcB.volume != want) _srcB.volume = want;
+                for (int i = 0; i < Block; i++) { _blockL[i] *= gain; _blockR[i] *= gain; }
             }
 
-            LastPeak = tickPeak;
+            if (buffered)
+            {
+                // 指向性：按"该声源朝哪"与"听者在该方向看它"的夹角分带着色（离轴才变色）
+                if (_directivity.Enabled)
+                {
+                    _directivity.Process(_dirStateL, _blockL, Block, rate,
+                        _snapAzL, _snapElL, _snapAimL, _snapAimAzL, _snapAimElL);
+                    _directivity.Process(_dirStateR, _blockR, Block, rate,
+                        _snapAzR, _snapElR, _snapAimR, _snapAimAzR, _snapAimElR);
+                }
+
+                // 距离衰减：参考距离处 0dB、距离翻倍 −6dB（与桌面版同一套 1/r 律）
+                if (DistanceOn)
+                {
+                    float gl = RefDistM / Math.Max(0.3f, _snapDistL);
+                    float gr = RefDistM / Math.Max(0.3f, _snapDistR);
+                    if (gl != 1f) for (int i = 0; i < Block; i++) _blockL[i] *= gl;
+                    if (gr != 1f) for (int i = 0; i < Block; i++) _blockR[i] *= gr;
+                }
+
+                BinauralEngine.SetDirections(_snapDir[0], _snapDir[1]);
+                BinauralEngine.Process(_blockL, _blockR, _blockStereo, Block, SaiMode.FullHrtf);
+            }
+            else
+            {
+                // 断流：直接出静音，别在静音上白跑 HRTF/指向性
+                Array.Clear(_blockStereo, 0, Block * 2);
+            }
+
+            // 听音室：一次反射 + 混响尾，累加到两耳（不清零）
+            if (_room.Enabled && roomAlive)
+            {
+                // 房间几何用"电视挂在 2m 高"的假设：方位与水平距离取真实发声点，高度换成电视高度
+                RoomAzElDist(_snapAzL, _snapElL, _snapDistL, out float rAzL, out float rElL, out float rDistL);
+                RoomAzElDist(_snapAzR, _snapElR, _snapDistR, out float rAzR, out float rElR, out float rDistR);
+                _room.Process(_blockL, _blockR, _blockStereo, Block, rate,
+                    rAzL, rElL, rDistL, rAzR, rElR, rDistR);
+            }
+
+            for (int i = 0; i < Block * 2; i++)
+            {
+                float a = _blockStereo[i] < 0 ? -_blockStereo[i] : _blockStereo[i];
+                if (a > peak) peak = a;
+            }
+            LastPeak = peak;
         }
 
         /// <summary>世界方向 → 头坐标系单位向量（X=右, Y=上, Z=前；双耳引擎约定与 Unity 轴一致）。</summary>
@@ -1136,40 +1169,15 @@ namespace VirtualStereo
         {
             try
             {
-                if (_srcB != null) _srcB.Stop();
                 if (_goL != null) Object.Destroy(_goL);
                 if (_goR != null) Object.Destroy(_goR);
-                if (_goB != null) Object.Destroy(_goB);
             }
             catch { }
-            _goL = _goR = _goB = null;
-            _srcB = null;
-            _clipB = null;
+            _goL = _goR = null;
             _markerL = _markerR = null;
             _aimL = _aimR = null;
             _screen = null;
         }
-
-        /// <summary>把 clip 上 [startFrame, startFrame+frames) 写成静音（立体声，offset 以帧计）。
-        /// 只在写指针跳转时使用：不清零的话播放头会念到上一圈残留的旧内容（切片乱跳）。</summary>
-        private static void ZeroClipRange(int startFrame, int frames, int clipLen)
-        {
-            if (_clipB == null || frames <= 0) return;
-            int done = 0;
-            while (done < frames)
-            {
-                int off = (startFrame + done) % clipLen;
-                int n = Block;
-                if (n > clipLen - off) n = clipLen - off; // 不越过 clip 末尾
-                if (n > frames - done) n = frames - done;
-                if (n <= 0) break;
-                float[] z = n == Block ? _zeroBlock : new float[n * 2];
-                _clipB.SetData(z, off);
-                done += n;
-            }
-        }
-
-        private static readonly float[] _zeroBlock = new float[Block * 2];
 
         private static long NowMs => Environment.TickCount64;
     }

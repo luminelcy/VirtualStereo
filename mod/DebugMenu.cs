@@ -314,14 +314,12 @@ namespace VirtualStereo
             GUILayout.EndHorizontal();
             SyncGainText();
 
-            // 延迟诊断：环电平（读门槛）+ 渲染前置（写指针领先播放头）
+            // 延迟诊断：采集环电平（读门槛）+ 设备缓冲深度 + 设备欠载次数。
+            // 音频不再经 Unity：出声在音频线程上直接写声卡，所以这里没有"渲染前置"这个旋钮了。
             GUILayout.BeginHorizontal();
-            GUILayout.Label($"延迟 环{AudioEngine.RingLevelMs}ms 前置{AudioEngine.RenderLeadMs}ms(实测{AudioEngine.LeadMs}ms) 欠载{AudioEngine.Underruns}",
+            GUILayout.Label($"延迟 采集环{AudioEngine.CaptureBufferMs}ms 设备缓冲{AudioEngine.OutFillMs}ms 设备欠载{AudioEngine.OutUnderruns}",
                 GUILayout.Width(300));
-            if (GUILayout.Button("-10", GUILayout.Width(36)))
-                AudioEngine.RenderLeadMs = Math.Max(20, AudioEngine.RenderLeadMs - 10);
-            if (GUILayout.Button("+10", GUILayout.Width(36)))
-                AudioEngine.RenderLeadMs = Math.Min(200, AudioEngine.RenderLeadMs + 10);
+            GUILayout.Label($"门槛{AudioEngine.PreRollLowMs}/{AudioEngine.PreRollHighMs}ms", GUILayout.Width(100));
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
