@@ -8,6 +8,9 @@
 // F9 = 总开关（关闭时恢复原声直出）。日志含 RMS 巡检，用于观察静音实验结果。
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using MelonLoader;
 using UnityEngine;
 using VirtualStereo.Capture;
@@ -30,11 +33,49 @@ namespace VirtualStereo
 
         public override void OnInitializeMelon()
         {
+            // phonon.dll 的位置解析：Windows 的 DllImport 只搜"进程目录（游戏根）+
+            // 系统目录 + PATH"，**不搜 Mods/**；MelonLoader 的 UserLibs/ 只保证托管依赖。
+            // 所以这里显式注册解析器，按 游戏根 → UserLibs → mod 自己所在目录 依次找，
+            // 三种放法都能用（默认仍是游戏根，与 README 一致）。
+            System.Runtime.InteropServices.NativeLibrary.SetDllImportResolver(typeof(Core).Assembly, ResolveNativeLibrary);
+
             // core 的日志出口接上 MelonLoader（core 不能依赖 MelonLoader，由壳注入）
             VsLog.OnInfo = m => MelonLogger.Msg(m);
             VsLog.OnError = m => MelonLogger.Error(m);
 
             // MelonLogger.Msg("[VirtualStereo] 已加载：F9 = 虚拟立体声开关");
+        }
+
+        /// <summary>phonon.dll 的载入位置解析。返回 IntPtr.Zero 表示交回 .NET 默认解析
+        /// （默认会搜进程目录＝游戏根 + 系统目录 + PATH）。只处理 phonon，别的原生库不动。</summary>
+        private static IntPtr ResolveNativeLibrary(string libraryName, Assembly assembly,
+            DllImportSearchPath? searchPath)
+        {
+            if (string.IsNullOrEmpty(libraryName) ||
+                libraryName.IndexOf("phonon", StringComparison.OrdinalIgnoreCase) < 0)
+                return IntPtr.Zero;
+
+            // 依次找：游戏根 → 游戏根/UserLibs → mod 自己所在目录（通常是 Mods/）
+            string root = AppDomain.CurrentDomain.BaseDirectory ?? "";
+            string[] dirs =
+            {
+                root,
+                Path.Combine(root, "UserLibs"),
+                Path.GetDirectoryName(typeof(Core).Assembly.Location) ?? "",
+            };
+            foreach (string d in dirs)
+            {
+                if (string.IsNullOrEmpty(d)) continue;
+                try
+                {
+                    string p = Path.Combine(d, libraryName);
+                    if (!File.Exists(p)) continue;
+                    MelonLogger.Msg("[VirtualStereo] 载入原生库: " + p);
+                    return System.Runtime.InteropServices.NativeLibrary.Load(p);
+                }
+                catch { }
+            }
+            return IntPtr.Zero;
         }
 
         public override void OnUpdate()

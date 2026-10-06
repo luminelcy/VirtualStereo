@@ -22,11 +22,20 @@ namespace VirtualStereo
         private static ProcessLoopbackCapture _capture;
         // L/R 只是"虚拟声源位置"载体（标记球/朝向箭头挂它们下面），不挂 AudioSource。
         // 出声不走 Unity：由 core/AudioCapture/WasapiOutput.cs 在音频线程里直接写声卡。
-        private static GameObject _goL, _goR;
         private static Transform _screen;
 
         // ── 音频线程（不走 Unity 音频；节奏由声卡决定，与游戏帧率解耦）──
-        private const int Block = 1024;                      // DSP 块长（48k 下 21.3ms）
+        // DSP 块长：48k 下 512 帧 ≈ 10.7ms。DSP 已经不在主线程上，块长只影响
+        // 「听到的声音至少滞后一个块」这一项，所以从 1024 降到 512 换来 10.6ms 延迟；
+        // 代价是音频线程上 HRTF/Room 的调用次数翻倍（每块固定开销），
+        // 复核指标：面板「设备欠载」是否仍然不涨。
+        private const int Block = 512;
+        // ── 三对虚拟音箱（6 个声源）：0/1 = 上排（外），2/3 = 中排（内），4/5 = 下排（外）──
+        // 真实电视是"面声源"：垂直铺开几乎不糊水平声像，却能带来"一整块板子"的感觉。
+        // 每层用 M/S 分权：M 主要给中间那层（实心），S 主要给上下两层（铺开），
+        // 这样既避免同一信号多路相干叠加的梳状染色，又能单独调"宽度"。
+        public const int RowCount = 3;
+        public const int SrcCount = RowCount * 2;
         private static readonly float[] _blockL = new float[Block];
         private static readonly float[] _blockR = new float[Block];
         private static readonly float[] _blockStereo = new float[Block * 2];
@@ -37,11 +46,70 @@ namespace VirtualStereo
         private const int RoomTailMs = 600;
 
         // ── 主线程写、音频线程读的空间快照（Unity 的 Transform 只能在主线程读）──
-        private static readonly SaiVector3[] _snapDir = new SaiVector3[2];
-        private static float _snapAzL, _snapElL, _snapDistL;
-        private static float _snapAzR, _snapElR, _snapDistR;
-        private static int _snapAimL = 3, _snapAimR = 3;
-        private static float _snapAimAzL, _snapAimElL, _snapAimAzR, _snapAimElR;
+        private static readonly SaiVector3[] _snapDir = new SaiVector3[SrcCount];
+        private static readonly float[][] _srcBuf = NewSrcBufs();
+        private static readonly float[] _roomL = new float[Block];
+        private static readonly float[] _roomR = new float[Block];
+
+        private static float[][] NewSrcBufs()
+        {
+            var b = new float[SrcCount][];
+            for (int i = 0; i < SrcCount; i++) b[i] = new float[Block];
+            return b;
+        }
+        // 每源一份快照（6 个声源：row*2+ch）
+        private static readonly float[] _posX = new float[SrcCount];
+        private static readonly float[] _posY = new float[SrcCount];
+        private static readonly float[] _posZ = new float[SrcCount];
+        private static readonly float[] _srcAz = new float[SrcCount];
+        private static readonly float[] _srcEl = new float[SrcCount];
+        private static readonly float[] _srcDist = new float[SrcCount];
+        private static readonly int[] _srcAimMode = new int[SrcCount];
+        private static readonly float[] _srcAimAz = new float[SrcCount];
+        private static readonly float[] _srcAimEl = new float[SrcCount];
+
+        // ── 三对音箱的布局参数（面板可调）──
+        private static readonly bool[] RowOn = { true, true, true };
+        /// <summary>上下两层相对屏幕中心的垂直偏移（米）。</summary>
+        public static float RowDyM { get; set; } = 0.8f;
+        /// <summary>中间那层的横向比例（1 = 与上下同宽；越小越靠内侧）。</summary>
+        public static float RowInnerScale { get; set; } = 1.2f;
+        /// <summary>上下两层的横向比例（1 = 屏幕半宽 × 0.85 的原始间距）。</summary>
+        public static float RowOuterScale { get; set; } = 0.9f;
+        /// <summary>上下两层朝外偏的方位角（度，0 = 与中间一样朝观众）。</summary>
+        public static float RowOuterAimDeg { get; set; } = 0f;
+        /// <summary>每层的 M 增益（实心程度）与 S 增益（铺开程度）。
+        /// 当前默认（实测选定）：上下两层出 M 为主、中间那层出 S 为主
+        /// —— 声像实体由屏幕上下缘撑着，宽度由中间那对铺。ΣM=1.7、ΣS=1.15。</summary>
+        public static readonly float[] RowGainM = { 0.80f, 0.10f, 0.80f };
+        public static readonly float[] RowGainS = { 0.15f, 0.85f, 0.15f };
+
+        // 面板用的访问器（外层 = 上/下两排，共用一组增益）
+        public static bool RowEnabled(int row) => row >= 0 && row < RowCount && RowOn[row];
+        public static void SetRowEnabled(int row, bool on)
+        {
+            if (row >= 0 && row < RowCount) RowOn[row] = on;
+        }
+        public static float MidGainM
+        {
+            get => RowGainM[1];
+            set => RowGainM[1] = ClampF(value, 0f, 1.5f);
+        }
+        public static float MidGainS
+        {
+            get => RowGainS[1];
+            set => RowGainS[1] = ClampF(value, 0f, 1.5f);
+        }
+        public static float OuterGainM
+        {
+            get => RowGainM[0];
+            set { RowGainM[0] = RowGainM[2] = ClampF(value, 0f, 1.5f); }
+        }
+        public static float OuterGainS
+        {
+            get => RowGainS[0];
+            set { RowGainS[0] = RowGainS[2] = ClampF(value, 0f, 1.5f); }
+        }
 
         /// <summary>读门槛（毫秒）：环电平掉到「低」以下出静音保护，回到「高」以上才恢复读。</summary>
         public static int PreRollLowMs { get; set; } = 10;
@@ -80,8 +148,14 @@ namespace VirtualStereo
         // ── 声学：指向性 / 距离衰减 / 听音室（2 声源版，不涉及多声道）──
         // 链路顺序与桌面版一致：前置增益 → 指向性 → 距离衰减 → 空间化(HRTF) → 听音室。
         private static readonly DirectivityProcessor _directivity = NewDirectivity();
-        private static readonly DirectivityState _dirStateL = new DirectivityState();
-        private static readonly DirectivityState _dirStateR = new DirectivityState();
+        private static readonly DirectivityState[] _dirState = NewDirStates();
+
+        private static DirectivityState[] NewDirStates()
+        {
+            var a = new DirectivityState[SrcCount];
+            for (int i = 0; i < SrcCount; i++) a[i] = new DirectivityState();
+            return a;
+        }
 
         // ── 材料库：三个表面各自一组选项，每项三带吸声系数（低<250Hz / 中250-2k / 高>2k）──
         // 数值取自常用吸声系数表：厚地毯(带垫层)、厚重窗帘、木板(薄板共振吸低频)等。
@@ -126,14 +200,15 @@ namespace VirtualStereo
         private static DirectivityProcessor NewDirectivity()
         {
             var d = new DirectivityProcessor { Enabled = true, Family = 0 };
-            d.FillGradientAngle(180f, 0.3f, 110f, 1.5f); // 低频宽高频窄，与「标准」预设一致
+            d.FillGradientAngle(180f, 0.3f, 120f, 1f); // 低频宽高频窄，与「标准」预设一致
             return d;
         }
 
         private static RoomRenderer NewRoom()
         {
-            // 默认电平：反射 −10dB / 混响 −15dB（类默认是 −6/−12，这里按调试结论收紧）
-            var r = new RoomRenderer { Enabled = true, ReflDb = -10f, ReverbDb = -15f };
+            // 默认电平与明暗：反射 −10dB / 混响 −15dB / 明亮度 0.7（类默认是 −6/−12/0.4，
+            // 这里按实测结论覆盖：尾巴收得更快、更暗，贴近软装客厅）
+            var r = new RoomRenderer { Enabled = true, ReflDb = -10f, ReverbDb = -15f, Damp = 0.7f };
             // 默认按 mac 版「电视房」：3.8 × 3.8 地板 × 5.0 层高，听者在正中
             // → 电视墙离听者 1.9m（就是"电视挂在 2m 位置"那个设定）。
             var m = r.Model;
@@ -161,95 +236,12 @@ namespace VirtualStereo
 
         /// <summary>声源朝向（固定，不给改）：0 朝听者 / 1 朝前（跟随视角）/ 2 手动 / 3 观众席。
         /// 现在恒为 3 = 两箱轴线平行、取屏幕法线朝观众那一侧，**世界系固定**，不随视角转。</summary>
-        public const int AimModeL = 3;
-        public const int AimModeR = 3;
-        public static float AimAz { get; set; }
-        public static float AimEl { get; set; }
-
-        /// <summary>某声道当前朝向的世界系单位向量（图形标注与调试读数用）。</summary>
-        public static Vector3 AimDirWorld(int channel)
+        /// <summary>某虚拟声源当前朝向的世界系单位向量（图形标注与调试读数用）。</summary>
+        public static Vector3 AimDirWorld(int src)
         {
-            var go = channel == 0 ? _goL : _goR;
-            var pos = go != null ? go.transform.position : Vector3.zero;
-            return AimDir(channel == 0 ? AimModeL : AimModeR, pos);
-        }
-
-        /// <summary>朝向 → 世界系方向。0 朝听者 / 1 朝前（跟随头部）/ 2 手动（头坐标角度）。</summary>
-        private static Vector3 AimDir(int mode, Vector3 sourcePos)
-        {
-            if (_listener == null) return new Vector3(0f, 0f, 1f);
-
-            if (mode == 1) return _listener.forward; // 朝前：头（相机）前方
-
-            if (mode == 3) // 观众席：两箱轴线平行，方向 = 屏幕中心 → 听者
-            {
-                // 有屏幕时用**屏幕自身的正面法线**：音箱钉在屏幕上，轴向与面板垂直。
-                // 只依赖屏幕的摆放旋转，跟听者位置、视角都无关。
-                if (_screen != null)
-                {
-                    ScreenFrame(_screen, out Vector3 nf, out _);
-                    float lf = (float)Math.Sqrt(nf.x * nf.x + nf.y * nf.y + nf.z * nf.z);
-                    if (lf > 1e-4f) return new Vector3(nf.x / lf, nf.y / lf, nf.z / lf);
-                }
-
-                // 没有屏幕时退化为：两箱中点 → 听者
-                Vector3 from;
-                if (_goL != null && _goR != null)
-                {
-                    var a = _goL.transform.position;
-                    var b = _goR.transform.position;
-                    from = new Vector3((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f, (a.z + b.z) * 0.5f);
-                }
-                else
-                {
-                    return new Vector3(0f, 0f, 1f);
-                }
-                float x3 = _listener.position.x - from.x;
-                float y3 = _listener.position.y - from.y;
-                float z3 = _listener.position.z - from.z;
-                float l3 = (float)Math.Sqrt(x3 * x3 + y3 * y3 + z3 * z3);
-                if (l3 < 1e-4f) return new Vector3(0f, 0f, 1f);
-                return new Vector3(x3 / l3, y3 / l3, z3 / l3);
-            }
-
-            if (mode == 2) // 手动：头坐标方位/仰角 → 世界系
-            {
-                double a = AimAz * Math.PI / 180.0;
-                double e = AimEl * Math.PI / 180.0;
-                float ce = (float)Math.Cos(e);
-                float x = (float)(Math.Sin(a) * ce);
-                float y = (float)Math.Sin(e);
-                float z = (float)(Math.Cos(a) * ce);
-                var r = _listener.right;
-                var u = _listener.up;
-                var f = _listener.forward;
-                return new Vector3(x * r.x + y * u.x + z * f.x,
-                                   x * r.y + y * u.y + z * f.y,
-                                   x * r.z + y * u.z + z * f.z);
-            }
-
-            // 0 朝听者：声源 → 听者
-            float dx = _listener.position.x - sourcePos.x;
-            float dy = _listener.position.y - sourcePos.y;
-            float dz = _listener.position.z - sourcePos.z;
-            float len = (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
-            if (len < 1e-4f) return new Vector3(0f, 0f, 1f);
-            return new Vector3(dx / len, dy / len, dz / len);
-        }
-
-        /// <summary>把声道朝向设置换算成 DirectivityProcessor 需要的（模式, 头坐标方位, 仰角）。
-        /// 「观众席」定义在世界系，这里换算成头坐标角度后走手动分支。</summary>
-        private static void ResolveAim(int channel, out int mode, out float azDeg, out float elDeg)
-        {
-            mode = channel == 0 ? AimModeL : AimModeR;
-            azDeg = AimAz;
-            elDeg = AimEl;
-            if (mode != 3) return;
-
-            var go = channel == 0 ? _goL : _goR;
-            var pos = go != null ? go.transform.position : Vector3.zero;
-            HeadAngles(AimDir(3, pos), out azDeg, out elDeg);
-            mode = 2; // DirectivityProcessor 的手动角度分支
+            int row = src / 2, ch = src % 2;
+            float outDeg = row == 1 ? 0f : RowOuterAimDeg;
+            return AimWorldForRow(row, ch, outDeg);
         }
 
         /// <summary>世界系方向 → 头坐标方位/仰角（度）。</summary>
@@ -369,8 +361,8 @@ namespace VirtualStereo
         // 锥角 = 半角（度，锥内满电平）；锐度 = 锥外衰减指数，增益 = (α/θ)^锐度，越大越指向。
         public static float DirConeLoDeg { get; set; } = 180f;
         public static float DirSharpLo { get; set; } = 0.3f;
-        public static float DirConeHiDeg { get; set; } = 110f;
-        public static float DirSharpHi { get; set; } = 1.5f;
+        public static float DirConeHiDeg { get; set; } = 120f;
+        public static float DirSharpHi { get; set; } = 1f;
 
         /// <summary>用当前四个端点值生成 6 带锥形数据（渐变生成器）。</summary>
         public static void ApplyDirectivityGradient()
@@ -379,7 +371,7 @@ namespace VirtualStereo
             _directivity.FillGradientAngle(DirConeLoDeg, DirSharpLo, DirConeHiDeg, DirSharpHi);
         }
 
-        /// <summary>指向性预设：0 全向 / 1 宽 / 2 标准（180°&0.3 → 110°&1.5）/ 3 强指向。</summary>
+        /// <summary>指向性预设：0 全向 / 1 宽 / 2 标准（180°&0.3 → 120°&1）/ 3 强指向。</summary>
         public static void SetDirectivityPreset(int idx)
         {
             switch (idx)
@@ -394,7 +386,7 @@ namespace VirtualStereo
                     break;
                 case 2: // 标准
                     DirConeLoDeg = 180f; DirSharpLo = 0.3f;
-                    DirConeHiDeg = 110f; DirSharpHi = 1.5f;
+                    DirConeHiDeg = 120f; DirSharpHi = 1f;
                     break;
                 default: // 强指向
                     DirConeLoDeg = 100f; DirSharpLo = 1f;
@@ -516,13 +508,21 @@ namespace VirtualStereo
         /// <summary>双耳引擎 + 音频线程都就绪（Core 只在这里为真时才去压原声音量）。</summary>
         public static bool HrtfReady => BinauralEngine.Initialized && _audioRunning && _out != null;
 
+        /// <summary>空间化程度 0.3~1（1 = 完全 HRTF 点声源）。调低 → 声像更宽、更像"面声源"，
+        /// 轻微转头时的移动幅度也更小。真实电视是一整块面板在辐射，本来就该偏宽。</summary>
+        public static float SpatialBlend
+        {
+            get => BinauralEngine.SpatialBlend;
+            set => BinauralEngine.SpatialBlend = ClampF(value, 0.2f, 1f);
+        }
+
         // ── 调试：手动坐标模式 + 标记球 ──
         private static bool _manualMode;
         private static Vector3 _manualL, _manualR;
         // 标记球 + 朝向箭头：只在调试版默认显示（发布版里根本不创建）
         private static bool _markersOn = BuildFlags.Dev;
-        private static GameObject _markerL, _markerR;
-        private static GameObject _aimL, _aimR;   // 朝向箭头（杆 + 尖），局部 +Y = 朝向
+        private static readonly GameObject[] _marker = new GameObject[SrcCount];
+        private static readonly GameObject[] _aimArrow = new GameObject[SrcCount]; // 局部 +Y = 朝向
         private static Transform _listener;
 
         public static bool ManualMode => _manualMode;
@@ -539,14 +539,32 @@ namespace VirtualStereo
 
         private static void ApplyManualPositions()
         {
-            if (_goL != null) _goL.transform.position = _manualL;
-            if (_goR != null) _goR.transform.position = _manualR;
+            // 手动坐标只管中间那对（调试用）；上下两层按同样的偏移/外扩比例跟着摆
+            var inner = _manualR - _manualL;
+            float halfInner = 0.5f * (float)Math.Sqrt(inner.x * inner.x + inner.y * inner.y + inner.z * inner.z);
+            float halfOuter = RowInnerScale > 1e-3f ? halfInner / RowInnerScale * RowOuterScale : halfInner;
+            Vector3 mid = new Vector3((_manualL.x + _manualR.x) * 0.5f,
+                                      (_manualL.y + _manualR.y) * 0.5f,
+                                      (_manualL.z + _manualR.z) * 0.5f);
+            Vector3 ux = NormV(inner.x, inner.y, inner.z);
+            for (int row = 0; row < RowCount; row++)
+            {
+                float half = row == 1 ? halfInner : halfOuter;
+                float dy = row == 0 ? RowDyM : (row == 2 ? -RowDyM : 0f);
+                _posX[row * 2] = mid.x - ux.x * half;
+                _posY[row * 2] = mid.y - ux.y * half + dy;
+                _posZ[row * 2] = mid.z - ux.z * half;
+                _posX[row * 2 + 1] = mid.x + ux.x * half;
+                _posY[row * 2 + 1] = mid.y + ux.y * half + dy;
+                _posZ[row * 2 + 1] = mid.z + ux.z * half;
+            }
         }
 
         public static void GetPositions(out Vector3 l, out Vector3 r, out Vector3 listener)
         {
-            l = _goL != null ? _goL.transform.position : Vector3.zero;
-            r = _goR != null ? _goR.transform.position : Vector3.zero;
+            // 面板读数用中间那对（上下两层的完整位置在标记球上看）
+            l = new Vector3(_posX[2], _posY[2], _posZ[2]);
+            r = new Vector3(_posX[3], _posY[3], _posZ[3]);
             var lis = Object.FindObjectOfType<AudioListener>();
             listener = lis != null ? lis.transform.position : Vector3.zero;
         }
@@ -558,37 +576,48 @@ namespace VirtualStereo
             {
                 _markersOn = value;
                 EnsureMarkers();
-                if (_markerL != null) _markerL.SetActive(value);
-                if (_markerR != null) _markerR.SetActive(value);
-                if (_aimL != null) _aimL.SetActive(value);
-                if (_aimR != null) _aimR.SetActive(value);
+                for (int s = 0; s < SrcCount; s++)
+                {
+                    if (_marker[s] != null) _marker[s].SetActive(value);
+                    if (_aimArrow[s] != null) _aimArrow[s].SetActive(value);
+                }
             }
         }
 
         private static void EnsureMarkers()
         {
-            if (!_markersOn || _goL == null || _goR == null) return;
-            if (_markerL == null) _markerL = MakeMarker("VS_Marker_L", _goL.transform, new Color(0.25f, 0.55f, 1f));
-            if (_markerR == null) _markerR = MakeMarker("VS_Marker_R", _goR.transform, new Color(1f, 0.35f, 0.3f));
-            if (_aimL == null) _aimL = MakeAimArrow("VS_Aim_L", _goL.transform, new Color(0.25f, 0.55f, 1f));
-            if (_aimR == null) _aimR = MakeAimArrow("VS_Aim_R", _goR.transform, new Color(1f, 0.35f, 0.3f));
+            if (!_markersOn) return;
 
-            // 朝听者方向偏 10cm，避免半个球埋进屏幕/墙里看不见
-            if (_markerL != null) _markerL.transform.localPosition = NudgeTowardListener(_goL);
-            if (_markerR != null) _markerR.transform.localPosition = NudgeTowardListener(_goR);
+            for (int s = 0; s < SrcCount; s++)
+            {
+                int row = s / 2, ch = s % 2;
+                var pos = new Vector3(_posX[s], _posY[s], _posZ[s]);
+                Color col = ch == 0 ? new Color(0.25f, 0.55f, 1f) : new Color(1f, 0.35f, 0.3f);
+                // 中间那对最亮，上下两层暗一点（便于分辨三对）
+                float shade = row == 1 ? 1f : 0.6f;
+                col = new Color(col.r * shade, col.g * shade, col.b * shade);
 
-            // 朝向箭头每帧更新（「朝前」跟随头部转，「朝听者」跟随声源与听者的相对位置变）
-            if (_aimL != null) _aimL.transform.up = AimDirWorld(0);
-            if (_aimR != null) _aimR.transform.up = AimDirWorld(1);
+                if (_marker[s] == null) _marker[s] = MakeMarker($"VS_Marker_{s}", col);
+                if (_aimArrow[s] == null) _aimArrow[s] = MakeAimArrow($"VS_Aim_{s}", col);
+
+                // 朝听者方向偏 10cm，避免半个球埋进屏幕/墙里看不见
+                var nudge = NudgeTowardListener(pos);
+                if (_marker[s] != null)
+                    _marker[s].transform.position = new Vector3(pos.x + nudge.x, pos.y + nudge.y, pos.z + nudge.z);
+                if (_aimArrow[s] != null)
+                {
+                    _aimArrow[s].transform.position = pos;
+                    _aimArrow[s].transform.up = AimDirWorld(s);
+                }
+            }
         }
 
         /// <summary>朝向标注：细杆 + 尖端小球，挂在声源物体上，局部 +Y 就是朝向
         /// （用 transform.up 赋世界方向，避开被 IL2CPP 裁掉的 FromToRotation / LookRotation）。</summary>
-        private static GameObject MakeAimArrow(string name, Transform parent, Color color)
+        private static GameObject MakeAimArrow(string name, Color color)
         {
             var root = new GameObject(name);
-            root.transform.SetParent(parent, false);
-            root.transform.localPosition = Vector3.zero;
+            Object.DontDestroyOnLoad(root);
 
             var shaft = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
             shaft.name = name + "_Shaft";
@@ -617,25 +646,22 @@ namespace VirtualStereo
             return root;
         }
 
-        private static Vector3 NudgeTowardListener(GameObject src)
+        private static Vector3 NudgeTowardListener(Vector3 pos)
         {
-            if (src == null || _listener == null) return Vector3.zero;
-            var from = src.transform.position;
+            if (_listener == null) return Vector3.zero;
             var to = _listener.position;
-            float dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
+            float dx = to.x - pos.x, dy = to.y - pos.y, dz = to.z - pos.z;
             float len = (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
             if (len < 1e-3f) return Vector3.zero;
             return new Vector3(dx / len * 0.1f, dy / len * 0.1f, dz / len * 0.1f);
         }
 
-        private static GameObject MakeMarker(string name, Transform parent, Color color)
+        private static GameObject MakeMarker(string name, Color color)
         {
             var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             go.name = name;
             var col = go.GetComponent<Collider>();
             if (col != null) col.enabled = false; // 绝不干扰游戏物理/交互
-            go.transform.SetParent(parent, false);
-            go.transform.localPosition = Vector3.zero;
             go.transform.localScale = new Vector3(0.25f, 0.25f, 0.25f);
             var rend = go.GetComponent<Renderer>();
             if (rend != null)
@@ -707,11 +733,6 @@ namespace VirtualStereo
             if (_capture == null) return;
             long now = NowMs;
 
-            if (_goL == null || _goR == null)
-            {
-                if (!CreateCarriers()) return;
-            }
-
             EnsureMarkers();
             SnapshotSpatial();
 
@@ -734,8 +755,8 @@ namespace VirtualStereo
                 }
                 var listener = Object.FindObjectOfType<AudioListener>();
                 string lp = listener != null ? $"{listener.transform.position.x:F1},{listener.transform.position.y:F1},{listener.transform.position.z:F1}" : "无";
-                string lPos = _goL != null ? $"{_goL.transform.position.x:F1},{_goL.transform.position.y:F1},{_goL.transform.position.z:F1}" : "-";
-                string rPos = _goR != null ? $"{_goR.transform.position.x:F1},{_goR.transform.position.y:F1},{_goR.transform.position.z:F1}" : "-";
+                string lPos = $"{_posX[2]:F1},{_posY[2]:F1},{_posZ[2]:F1}";
+                string rPos = $"{_posX[3]:F1},{_posY[3]:F1},{_posZ[3]:F1}";
                 // MelonLogger.Msg(
                     // $"[VirtualStereo] RMS={_capture.Rms:F4} L={_capture.RmsL:F4} R={_capture.RmsR:F4} " +
                     // $"相关度={_capture.Correlation:F3} 静音会话={_capture.SilencedSessions} 补偿=x{_capture.OutputGain:F0} " +
@@ -748,22 +769,6 @@ namespace VirtualStereo
         }
 
         /// <summary>只建两个位置载体（标记球/朝向箭头挂它们下面），不再建任何 AudioSource。</summary>
-        private static bool CreateCarriers()
-        {
-            try
-            {
-                _goL = new GameObject("VirtualStereo_L");
-                _goR = new GameObject("VirtualStereo_R");
-                Object.DontDestroyOnLoad(_goL);
-                Object.DontDestroyOnLoad(_goR);
-                return true;
-            }
-            catch (Exception e)
-            {
-                MelonLogger.Error("[VirtualStereo] 创建位置载体失败: " + e);
-                return false;
-            }
-        }
         // ───────────────────────── 音频线程：采集 → DSP → 自己的 WASAPI 输出 ─────────────────────────
         // 主线程只做 Unity 侧的事（位置载体、标记/箭头、相机快照、统计）；
         // 音频线程读快照做 DSP，节奏由**声卡**决定：设备缓冲有空位就产出一块。
@@ -781,33 +786,50 @@ namespace VirtualStereo
                 _listener = al != null ? al.transform : null;
             }
 
-            var pL = _goL != null ? _goL.transform.position : Vector3.zero;
-            var pR = _goR != null ? _goR.transform.position : Vector3.zero;
-            _snapDir[0] = HeadDir(pL);
-            _snapDir[1] = HeadDir(pR);
+            // 6 个声源各算一份：方向（头坐标单位向量）、方位/仰角/距离、朝向角
+            for (int s = 0; s < SrcCount; s++)
+            {
+                var p = new Vector3(_posX[s], _posY[s], _posZ[s]);
+                Vector3 dir = HeadDirV(p, out float dist);
+                _snapDir[s] = new SaiVector3(dir.x, dir.y, dir.z);
+                _srcDist[s] = dist;
+                _srcAz[s] = (float)(Math.Atan2(dir.x, dir.z) * 180.0 / Math.PI);
+                _srcEl[s] = (float)(Math.Asin(ClampF(dir.y, -1f, 1f)) * 180.0 / Math.PI);
 
-            float azL = 0f, elL = 0f, distL = RefDistM;
-            float azR = 0f, elR = 0f, distR = RefDistM;
-            if (_goL != null) HeadAzElDist(pL, out azL, out elL, out distL);
-            if (_goR != null) HeadAzElDist(pR, out azR, out elR, out distR);
-            _snapAzL = azL; _snapElL = elL; _snapDistL = distL;
-            _snapAzR = azR; _snapElR = elR; _snapDistR = distR;
-
-            // 朝向解析（「观众席」取屏幕自身法线，世界系固定）→ 换算成头坐标角度交给 DSP
-            ResolveAim(0, out int amL, out float aaL, out float aeL);
-            ResolveAim(1, out int amR, out float aaR, out float aeR);
-            _snapAimL = amL; _snapAimAzL = aaL; _snapAimElL = aeL;
-            _snapAimR = amR; _snapAimAzR = aaR; _snapAimElR = aeR;
+                // 朝向：中间层朝观众（屏幕法线），上下两层各朝外偏 RowOuterAimDeg
+                int row = s / 2;
+                int ch = s % 2; // 0 = 左, 1 = 右
+                float outDeg = row == 1 ? 0f : RowOuterAimDeg;
+                Vector3 aim = AimWorldForRow(row, ch, outDeg);
+                HeadAngles(aim, out float aaz, out float ael);
+                _srcAimMode[s] = 2; // 手动角度分支
+                _srcAimAz[s] = aaz;
+                _srcAimEl[s] = ael;
+            }
 
             if (_room.Enabled && RoomAutoFit)
             {
-                float dMax = distL > distR ? distL : distR;
+                float dMax = Math.Max(_srcDist[2], _srcDist[3]); // 用中间那层代表"视距"
                 if (Math.Abs(dMax - _autoFitDist) > 0.3f)
                 {
                     _autoFitDist = dMax;
                     AutoFitRoom(dMax);
                 }
             }
+        }
+
+        /// <summary>某一层某个声道的朝向（世界系）：屏幕法线绕"面板上轴"外偏 outDeg。
+        /// 左声道往外偏 = 朝屏幕左侧转，右声道对称。</summary>
+        private static Vector3 AimWorldForRow(int row, int ch, float outDeg)
+        {
+            if (_screen == null) return new Vector3(0f, 0f, 1f);
+            ScreenFrame(_screen, out Vector3 normal, out Vector3 right, out _);
+            float a = outDeg * (float)Math.PI / 180f;
+            float c = (float)Math.Cos(a), s = (float)Math.Sin(a);
+            float sign = ch == 0 ? -1f : 1f;
+            return NormV(normal.x * c + right.x * s * sign,
+                         normal.y * c + right.y * s * sign,
+                         normal.z * c + right.z * s * sign);
         }
 
         /// <summary>打开输出设备 + 起音频线程；失败就报错并保持游戏原声（Core 只在 HrtfReady 时压原声）。</summary>
@@ -948,26 +970,46 @@ namespace VirtualStereo
 
             if (buffered)
             {
-                // 指向性：按"该声源朝哪"与"听者在该方向看它"的夹角分带着色（离轴才变色）
-                if (_directivity.Enabled)
+                // 三对音箱的输入用 M/S 分权合成：M=(L+R)/2 实心、S=(L−R)/2 铺开。
+                // M 主要给中间那层、S 主要给上下两层——既避免同一信号多路相干叠加的
+                // 梳状染色，又能单独调"宽度"。
+                for (int s = 0; s < SrcCount; s++)
                 {
-                    _directivity.Process(_dirStateL, _blockL, Block, rate,
-                        _snapAzL, _snapElL, _snapAimL, _snapAimAzL, _snapAimElL);
-                    _directivity.Process(_dirStateR, _blockR, Block, rate,
-                        _snapAzR, _snapElR, _snapAimR, _snapAimAzR, _snapAimElR);
+                    int row = s / 2, ch = s % 2;
+                    float gm = RowOn[row] ? RowGainM[row] : 0f;
+                    float gs = RowOn[row] ? RowGainS[row] : 0f;
+                    float side = ch == 0 ? -1f : 1f;   // 左声道取 −S
+                    float distG = DistanceOn ? RefDistM / Math.Max(0.3f, _srcDist[s]) : 1f;
+                    float[] b = _srcBuf[s];
+                    for (int i = 0; i < Block; i++)
+                    {
+                        float m = (_blockL[i] + _blockR[i]) * 0.5f;
+                        float sd = (_blockL[i] - _blockR[i]) * 0.5f;
+                        b[i] = (m * gm + sd * gs * side) * distG;
+                    }
+
+                    // 指向性：按"该声源朝哪"与"听者在该方向看它"的夹角分带着色
+                    if (_directivity.Enabled)
+                    {
+                        _directivity.Process(_dirState[s], b, Block, rate,
+                            _srcAz[s], _srcEl[s], _srcAimMode[s], _srcAimAz[s], _srcAimEl[s]);
+                    }
                 }
 
-                // 距离衰减：参考距离处 0dB、距离翻倍 −6dB（与桌面版同一套 1/r 律）
-                if (DistanceOn)
+                // 听音室吃"三层之和"的两路干信号（否则反射路径要 36 条）
+                Array.Clear(_roomL, 0, Block);
+                Array.Clear(_roomR, 0, Block);
+                for (int row = 0; row < RowCount; row++)
                 {
-                    float gl = RefDistM / Math.Max(0.3f, _snapDistL);
-                    float gr = RefDistM / Math.Max(0.3f, _snapDistR);
-                    if (gl != 1f) for (int i = 0; i < Block; i++) _blockL[i] *= gl;
-                    if (gr != 1f) for (int i = 0; i < Block; i++) _blockR[i] *= gr;
+                    for (int i = 0; i < Block; i++)
+                    {
+                        _roomL[i] += _srcBuf[row * 2][i];
+                        _roomR[i] += _srcBuf[row * 2 + 1][i];
+                    }
                 }
 
-                BinauralEngine.SetDirections(_snapDir[0], _snapDir[1]);
-                BinauralEngine.Process(_blockL, _blockR, _blockStereo, Block, SaiMode.FullHrtf);
+                BinauralEngine.SetDirections(_snapDir, SrcCount);
+                BinauralEngine.Process(_srcBuf, SrcCount, _blockStereo, Block);
             }
             else
             {
@@ -979,9 +1021,9 @@ namespace VirtualStereo
             if (_room.Enabled && roomAlive)
             {
                 // 房间几何用"电视挂在 2m 高"的假设：方位与水平距离取真实发声点，高度换成电视高度
-                RoomAzElDist(_snapAzL, _snapElL, _snapDistL, out float rAzL, out float rElL, out float rDistL);
-                RoomAzElDist(_snapAzR, _snapElR, _snapDistR, out float rAzR, out float rElR, out float rDistR);
-                _room.Process(_blockL, _blockR, _blockStereo, Block, rate,
+                RoomAzElDist(_srcAz[2], _srcEl[2], _srcDist[2], out float rAzL, out float rElL, out float rDistL);
+                RoomAzElDist(_srcAz[3], _srcEl[3], _srcDist[3], out float rAzR, out float rElR, out float rDistR);
+                _room.Process(_roomL, _roomR, _blockStereo, Block, rate,
                     rAzL, rElL, rDistL, rAzR, rElR, rDistR);
             }
 
@@ -993,36 +1035,18 @@ namespace VirtualStereo
             LastPeak = peak;
         }
 
-        /// <summary>世界方向 → 头坐标系单位向量（X=右, Y=上, Z=前；双耳引擎约定与 Unity 轴一致）。</summary>
-        private static SaiVector3 HeadDir(Vector3 sourcePos)
+        /// <summary>世界位置 → 头坐标系单位向量（X=右, Y=上, Z=前）+ 真实 3D 距离（米）。
+        /// 双耳引擎、指向性、听音室都用这一套坐标。</summary>
+        private static Vector3 HeadDirV(Vector3 sourcePos, out float dist)
         {
-            if (_listener == null) return new SaiVector3(0, 0, 1);
-            var lp = _listener.position;
-            float dx = sourcePos.x - lp.x, dy = sourcePos.y - lp.y, dz = sourcePos.z - lp.z;
-            var r = _listener.right;
-            var u = _listener.up;
-            var f = _listener.forward;
-            float x = dx * r.x + dy * r.y + dz * r.z;
-            float y = dx * u.x + dy * u.y + dz * u.z;
-            float z = dx * f.x + dy * f.y + dz * f.z;
-            float len = (float)Math.Sqrt(x * x + y * y + z * z);
-            if (len < 1e-4f) return new SaiVector3(0, 0, 1);
-            return new SaiVector3(x / len, y / len, z / len);
-        }
-
-        /// <summary>声源相对听者的头坐标方位与距离：az 正前 0° / 右正，el 上正，dist 为真实 3D 距离（米）。
-        /// 指向性和听音室都按这套角度工作（与 HeadDir 同一坐标系）。</summary>
-        private static void HeadAzElDist(Vector3 sourcePos, out float azDeg, out float elDeg, out float dist)
-        {
-            azDeg = 0f;
-            elDeg = 0f;
             dist = RefDistM;
-            if (_listener == null) return;
+            if (_listener == null) return new Vector3(0f, 0f, 1f);
 
             var lp = _listener.position;
             float dx = sourcePos.x - lp.x, dy = sourcePos.y - lp.y, dz = sourcePos.z - lp.z;
             float len = (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
-            if (len < 1e-4f) return;
+            if (len < 1e-4f) return new Vector3(0f, 0f, 1f);
+            dist = len;
 
             var r = _listener.right;
             var u = _listener.up;
@@ -1030,12 +1054,15 @@ namespace VirtualStereo
             float x = dx * r.x + dy * r.y + dz * r.z;
             float y = dx * u.x + dy * u.y + dz * u.z;
             float z = dx * f.x + dy * f.y + dz * f.z;
+            return NormV(x, y, z);
+        }
 
-            dist = len;
-            azDeg = (float)(Math.Atan2(x, z) * 180.0 / Math.PI);
-            float s = y / len;
-            if (s > 1f) s = 1f; else if (s < -1f) s = -1f;
-            elDeg = (float)(Math.Asin(s) * 180.0 / Math.PI);
+        /// <summary>归一化（长度为 0 时退化为正前方）。</summary>
+        private static Vector3 NormV(float x, float y, float z)
+        {
+            float len = (float)Math.Sqrt(x * x + y * y + z * z);
+            if (len < 1e-4f) return new Vector3(0f, 0f, 1f);
+            return new Vector3(x / len, y / len, z / len);
         }
 
         /// <summary>屏幕宽度（米，prefab 局部尺寸，见 room_item_bounds.csv）。</summary>
@@ -1095,21 +1122,21 @@ namespace VirtualStereo
                 Vector3 center = t.position;
 
                 // 屏幕自身的朝向：不看听者，人站哪都不影响
-                ScreenFrame(t, out _, out Vector3 viewerRight);
+                ScreenFrame(t, out _, out Vector3 viewerRight, out Vector3 panelUp);
 
-                if (_goL != null)
+                // 三对音箱：上下两层贴外侧、中间一层靠内侧；上下两层各抬高 RowDyM
+                for (int row = 0; row < RowCount; row++)
                 {
-                    _goL.transform.position = new Vector3(
-                        center.x - viewerRight.x * spread,
-                        center.y - viewerRight.y * spread,
-                        center.z - viewerRight.z * spread);
-                }
-                if (_goR != null)
-                {
-                    _goR.transform.position = new Vector3(
-                        center.x + viewerRight.x * spread,
-                        center.y + viewerRight.y * spread,
-                        center.z + viewerRight.z * spread);
+                    float spreadR = spread * (row == 1 ? RowInnerScale : RowOuterScale);
+                    float dy = row == 0 ? RowDyM : (row == 2 ? -RowDyM : 0f);
+                    for (int ch = 0; ch < 2; ch++)
+                    {
+                        float sign = ch == 0 ? -1f : 1f;
+                        int s = row * 2 + ch;
+                        _posX[s] = center.x + viewerRight.x * spreadR * sign + panelUp.x * dy;
+                        _posY[s] = center.y + viewerRight.y * spreadR * sign + panelUp.y * dy;
+                        _posZ[s] = center.z + viewerRight.z * spreadR * sign + panelUp.z * dy;
+                    }
                 }
             }
             catch (Exception e)
@@ -1121,12 +1148,12 @@ namespace VirtualStereo
         /// <summary>屏幕自身的坐标系：正面法线 + 观众右手。只看屏幕 transform 的局部轴，
         /// 与听者位置无关——屏幕是钉上去的一面板子，朝向由摆放时的旋转决定。
         /// （面板零厚度方向=局部Y=法线；高度轴=局部Z，按世界上方翻正。）</summary>
-        private static void ScreenFrame(Transform t, out Vector3 normal, out Vector3 right)
+        private static void ScreenFrame(Transform t, out Vector3 normal, out Vector3 right, out Vector3 up)
         {
             Vector3 n = t.up;
             if (ScreenFrontSign < 0f) n = new Vector3(-n.x, -n.y, -n.z);
 
-            Vector3 up = t.forward;
+            up = t.forward;
             if (up.y < 0f) up = new Vector3(-up.x, -up.y, -up.z);
 
             normal = n;
@@ -1169,13 +1196,15 @@ namespace VirtualStereo
         {
             try
             {
-                if (_goL != null) Object.Destroy(_goL);
-                if (_goR != null) Object.Destroy(_goR);
+                for (int s = 0; s < SrcCount; s++)
+                {
+                    if (_marker[s] != null) Object.Destroy(_marker[s]);
+                    if (_aimArrow[s] != null) Object.Destroy(_aimArrow[s]);
+                    _marker[s] = null;
+                    _aimArrow[s] = null;
+                }
             }
             catch { }
-            _goL = _goR = null;
-            _markerL = _markerR = null;
-            _aimL = _aimR = null;
             _screen = null;
         }
 

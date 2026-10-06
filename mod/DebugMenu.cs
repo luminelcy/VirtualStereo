@@ -28,7 +28,7 @@ namespace VirtualStereo
 
         // ── 面板几何 ──
         private const float PanelW = 408f;
-        private const float PanelH = 715f;
+        private const float PanelH = 827f;
         private const float TitleH = 30f;
         private const float ManualZoneH = 72f; // 标题 + 增益滑条区（手绘），其下是 GUILayout 区
 
@@ -122,6 +122,66 @@ namespace VirtualStereo
                 GUILayout.Label("HRTF插值", GUILayout.Width(60));
                 if (GUILayout.Button("最近邻")) AudioEngine.SetInterpolation(0);
                 if (GUILayout.Button("双线性")) AudioEngine.SetInterpolation(1);
+                GUILayout.EndHorizontal();
+
+                // 「面声源」旋钮：空间度（1 = 完全 HRTF 点声源，调低声像更宽）
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"空间度{AudioEngine.SpatialBlend:F2}", GUILayout.Width(80));
+                if (GUILayout.Button("-.05", GUILayout.Width(38)))
+                    AudioEngine.SpatialBlend = AudioEngine.SpatialBlend - 0.05f;
+                if (GUILayout.Button("+.05", GUILayout.Width(38)))
+                    AudioEngine.SpatialBlend = AudioEngine.SpatialBlend + 0.05f;
+                GUILayout.EndHorizontal();
+
+                // ── 三对虚拟音箱（面声源）：0 上 / 1 中 / 2 下 ──
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("三层", GUILayout.Width(30));
+                for (int row = 0; row < 3; row++)
+                {
+                    bool on = GUILayout.Toggle(AudioEngine.RowEnabled(row),
+                        row == 0 ? "上" : (row == 1 ? "中" : "下"), GUILayout.Width(34));
+                    if (on != AudioEngine.RowEnabled(row)) AudioEngine.SetRowEnabled(row, on);
+                }
+                GUILayout.Label($"层间距{AudioEngine.RowDyM:F2}m", GUILayout.Width(84));
+                if (GUILayout.Button("-", GUILayout.Width(24)))
+                    AudioEngine.RowDyM = Math.Max(0f, AudioEngine.RowDyM - 0.05f);
+                if (GUILayout.Button("+", GUILayout.Width(24)))
+                    AudioEngine.RowDyM = Math.Min(1f, AudioEngine.RowDyM + 0.05f);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"内层横比{AudioEngine.RowInnerScale:F2}", GUILayout.Width(90));
+                if (GUILayout.Button("-", GUILayout.Width(24)))
+                    AudioEngine.RowInnerScale = Math.Max(0f, AudioEngine.RowInnerScale - 0.05f);
+                if (GUILayout.Button("+", GUILayout.Width(24)))
+                    AudioEngine.RowInnerScale = Math.Min(1.5f, AudioEngine.RowInnerScale + 0.05f);
+                GUILayout.Label($"外层横比{AudioEngine.RowOuterScale:F2}", GUILayout.Width(90));
+                if (GUILayout.Button("-", GUILayout.Width(24)))
+                    AudioEngine.RowOuterScale = Math.Max(0f, AudioEngine.RowOuterScale - 0.05f);
+                if (GUILayout.Button("+", GUILayout.Width(24)))
+                    AudioEngine.RowOuterScale = Math.Min(1.5f, AudioEngine.RowOuterScale + 0.05f);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"外偏{AudioEngine.RowOuterAimDeg:F0}°", GUILayout.Width(58));
+                if (GUILayout.Button("-2", GUILayout.Width(30)))
+                    AudioEngine.RowOuterAimDeg = Math.Max(0f, AudioEngine.RowOuterAimDeg - 2f);
+                if (GUILayout.Button("+2", GUILayout.Width(30)))
+                    AudioEngine.RowOuterAimDeg = Math.Min(60f, AudioEngine.RowOuterAimDeg + 2f);
+                GUILayout.Label($"中层M{AudioEngine.MidGainM:F2}S{AudioEngine.MidGainS:F2}", GUILayout.Width(104));
+                if (GUILayout.Button("M-", GUILayout.Width(26))) AudioEngine.MidGainM -= 0.05f;
+                if (GUILayout.Button("M+", GUILayout.Width(26))) AudioEngine.MidGainM += 0.05f;
+                if (GUILayout.Button("S-", GUILayout.Width(26))) AudioEngine.MidGainS -= 0.05f;
+                if (GUILayout.Button("S+", GUILayout.Width(26))) AudioEngine.MidGainS += 0.05f;
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"外层M{AudioEngine.OuterGainM:F2}S{AudioEngine.OuterGainS:F2}", GUILayout.Width(104));
+                if (GUILayout.Button("M-", GUILayout.Width(26))) AudioEngine.OuterGainM -= 0.05f;
+                if (GUILayout.Button("M+", GUILayout.Width(26))) AudioEngine.OuterGainM += 0.05f;
+                if (GUILayout.Button("S-", GUILayout.Width(26))) AudioEngine.OuterGainS -= 0.05f;
+                if (GUILayout.Button("S+", GUILayout.Width(26))) AudioEngine.OuterGainS += 0.05f;
+                GUILayout.Label("M 实心 / S 铺开", GUILayout.Width(110));
                 GUILayout.EndHorizontal();
 
                 GUILayout.BeginHorizontal();
