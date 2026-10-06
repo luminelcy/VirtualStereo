@@ -15,6 +15,13 @@
 
 	<PropertyGroup>
 		<EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+		<!-- 调试版（我们的机器）：定义 VS_DEV → F10 面板 + 标记球/朝向箭头。发布版不定义。 -->
+		<DefineConstants Condition="'$(DevBuild)' == 'true'">$(DefineConstants);VS_DEV</DefineConstants>
+		<!-- 游戏程序集目录：仓库内 game/ 优先（跨平台构建），否则退回 Windows 上"游戏与仓库并排"的布局 -->
+		<GameDirectory Condition="'$(GameDirectory)' == '' And Exists('$(MSBuildProjectDirectory)\..\game\MelonLoader')">..\game</GameDirectory>
+		<GameDirectory Condition="'$(GameDirectory)' == ''">..\..\gogh Focus with Your Avatar</GameDirectory>
+		<!-- Steam Audio 核心库目录（phonon.dll 不入库） -->
+		<PhononDir Condition="'$(PhononDir)' == ''">..\phonon</PhononDir>
 	</PropertyGroup>
 
 	<!-- 壳：MelonLoader/Unity 侧 -->
@@ -22,7 +29,7 @@
 		<Compile Include="Core.cs" />
 		<Compile Include="AudioEngine.cs" />
 		<Compile Include="DebugMenu.cs" />
-		<Compile Include="VirtualStereoChannel.cs" />
+		<Compile Include="BuildFlags.cs" />
 	</ItemGroup>
 
 	<!-- core：共享源码链接（保持单 dll 输出，符合 mod 发布打包惯例） -->
@@ -33,54 +40,57 @@
 		<Compile Include="..\core\AudioCapture\ProcessLoopbackCapture.cs" Link="core\AudioCapture\ProcessLoopbackCapture.cs" />
 		<Compile Include="..\core\Phonon\PhononNative.cs" Link="core\Phonon\PhononNative.cs" />
 		<Compile Include="..\core\Phonon\BinauralEngine.cs" Link="core\Phonon\BinauralEngine.cs" />
+		<Compile Include="..\core\Dsp\Directivity.cs" Link="core\Dsp\Directivity.cs" />
+		<Compile Include="..\core\Dsp\Room.cs" Link="core\Dsp\Room.cs" />
+		<Compile Include="..\core\Dsp\RoomReverb.cs" Link="core\Dsp\RoomReverb.cs" />
 	</ItemGroup>
 
 	<ItemGroup>
 		<Reference Include="MelonLoader">
-			<HintPath>..\..\gogh Focus with Your Avatar\MelonLoader\net6\MelonLoader.dll</HintPath>
+			<HintPath>$(GameDirectory)\MelonLoader\net6\MelonLoader.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="Il2CppInterop.Runtime">
-			<HintPath>..\..\gogh Focus with Your Avatar\MelonLoader\net6\Il2CppInterop.Runtime.dll</HintPath>
+			<HintPath>$(GameDirectory)\MelonLoader\net6\Il2CppInterop.Runtime.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="Il2CppInterop.Common">
-			<HintPath>..\..\gogh Focus with Your Avatar\MelonLoader\net6\Il2CppInterop.Common.dll</HintPath>
+			<HintPath>$(GameDirectory)\MelonLoader\net6\Il2CppInterop.Common.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="Il2Cppmscorlib">
-			<HintPath>..\..\gogh Focus with Your Avatar\MelonLoader\Il2CppAssemblies\Il2Cppmscorlib.dll</HintPath>
+			<HintPath>$(GameDirectory)\MelonLoader\Il2CppAssemblies\Il2Cppmscorlib.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="UnityEngine">
-			<HintPath>..\..\gogh Focus with Your Avatar\MelonLoader\Il2CppAssemblies\UnityEngine.dll</HintPath>
+			<HintPath>$(GameDirectory)\MelonLoader\Il2CppAssemblies\UnityEngine.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="UnityEngine.CoreModule">
-			<HintPath>..\..\gogh Focus with Your Avatar\MelonLoader\Il2CppAssemblies\UnityEngine.CoreModule.dll</HintPath>
+			<HintPath>$(GameDirectory)\MelonLoader\Il2CppAssemblies\UnityEngine.CoreModule.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="UnityEngine.AudioModule">
-			<HintPath>..\..\gogh Focus with Your Avatar\MelonLoader\Il2CppAssemblies\UnityEngine.AudioModule.dll</HintPath>
+			<HintPath>$(GameDirectory)\MelonLoader\Il2CppAssemblies\UnityEngine.AudioModule.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="UnityEngine.InputLegacyModule">
-			<HintPath>..\..\gogh Focus with Your Avatar\MelonLoader\Il2CppAssemblies\UnityEngine.InputLegacyModule.dll</HintPath>
+			<HintPath>$(GameDirectory)\MelonLoader\Il2CppAssemblies\UnityEngine.InputLegacyModule.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="UnityEngine.IMGUIModule">
-			<HintPath>..\..\gogh Focus with Your Avatar\MelonLoader\Il2CppAssemblies\UnityEngine.IMGUIModule.dll</HintPath>
+			<HintPath>$(GameDirectory)\MelonLoader\Il2CppAssemblies\UnityEngine.IMGUIModule.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="UnityEngine.PhysicsModule">
-			<HintPath>..\..\gogh Focus with Your Avatar\MelonLoader\Il2CppAssemblies\UnityEngine.PhysicsModule.dll</HintPath>
+			<HintPath>$(GameDirectory)\MelonLoader\Il2CppAssemblies\UnityEngine.PhysicsModule.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 	</ItemGroup>
 
 	<!-- Steam Audio 核心库（Apache 2.0）：随输出，部署时进游戏根目录 -->
 	<ItemGroup>
-		<None Include="..\phonon\phonon.dll" Link="phonon.dll" CopyToOutputDirectory="PreserveNewest" />
+		<None Include="$(PhononDir)\phonon.dll" Link="phonon.dll" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(PhononDir)\phonon.dll')" />
 	</ItemGroup>
 
 	<!-- 构建后自动部署到 Steam 游戏目录 -->
@@ -90,7 +100,7 @@
 	</PropertyGroup>
 	<Target Name="DeployToGame" AfterTargets="Build" Condition="Exists('$(GameModsDir)')">
 		<Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(GameModsDir)" />
-		<Copy SourceFiles="..\phonon\phonon.dll" DestinationFolder="$(GameRootDir)" />
+		<Copy SourceFiles="$(PhononDir)\phonon.dll" DestinationFolder="$(GameRootDir)" Condition="Exists('$(PhononDir)\phonon.dll')" />
 		<Message Importance="high" Text="Deployed $(AssemblyName).dll to $(GameModsDir)" />
 	</Target>
 </Project>

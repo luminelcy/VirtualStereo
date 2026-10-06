@@ -5,6 +5,9 @@
 //   被裁：BeginArea / DragWindow / HorizontalSlider / GetLastRect / TextField(Rect,...)
 //   幸存：GUILayout 的 Box/Button/TextField(text,maxLen,...)/Label/Toggle/BeginHorizontal...
 // 因此布局拆两区：标题+增益滑条=固定坐标手绘（鼠标交互自研）；其余=GUILayout 流式。
+//
+// 整个文件只在调试版（-p:DevBuild=true）里编译：发布版不含调试面板（F10 无响应）。
+#if VS_DEV
 using System;
 using System.Globalization;
 using MelonLoader;
@@ -20,12 +23,12 @@ namespace VirtualStereo
         private static bool _fieldsInit;
         private static string _lx, _ly, _lz, _rx, _ry, _rz;
         private static string _sofaPath = "";
-        private static string _gainText = "-6.0";
+        private static string _gainText = "-12.0";
         private static string _status = "";
 
         // ── 面板几何 ──
         private const float PanelW = 408f;
-        private const float PanelH = 412f;
+        private const float PanelH = 715f;
         private const float TitleH = 30f;
         private const float ManualZoneH = 72f; // 标题 + 增益滑条区（手绘），其下是 GUILayout 区
 
@@ -112,16 +115,9 @@ namespace VirtualStereo
             SetTranslate(_pos.x, _pos.y + ManualZoneH);
             GUILayout.BeginVertical(GUILayout.Width(400));
 
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("模式", GUILayout.Width(26));
-            if (GUILayout.Button("双音箱")) SwitchMode(AudioEngine.SpatialMode.Speakers);
-            if (GUILayout.Button("双耳HRTF")) SwitchMode(AudioEngine.SpatialMode.FullHrtf);
-            if (GUILayout.Button("ITD+ILD")) SwitchMode(AudioEngine.SpatialMode.ItdIld);
-            GUILayout.EndHorizontal();
-            GUILayout.Label("当前: " + ModeName());
-
-            if (AudioEngine.Mode != AudioEngine.SpatialMode.Speakers)
+            // 单模式：只有双耳 HRTF（对照实验的双音箱/ITD+ILD 已删除）
             {
+                GUILayout.Label($"模式: 双耳 HRTF{(AudioEngine.HrtfReady ? "" : "（引擎未就绪）")}");
                 GUILayout.BeginHorizontal();
                 GUILayout.Label("HRTF插值", GUILayout.Width(60));
                 if (GUILayout.Button("最近邻")) AudioEngine.SetInterpolation(0);
@@ -143,6 +139,169 @@ namespace VirtualStereo
                     if (BinauralEngine.LoadSofa(null)) _status = "已恢复内置 HRTF";
                 }
                 GUILayout.EndHorizontal();
+
+                // ── 声学：指向性 / 距离衰减 / 听音室 ──
+                GUILayout.BeginHorizontal();
+                bool dirOn = GUILayout.Toggle(AudioEngine.DirectivityOn, "指向性", GUILayout.Width(72));
+                if (dirOn != AudioEngine.DirectivityOn) AudioEngine.DirectivityOn = dirOn;
+                bool distOn = GUILayout.Toggle(AudioEngine.DistanceOn, "距离衰减", GUILayout.Width(80));
+                if (distOn != AudioEngine.DistanceOn) AudioEngine.DistanceOn = distOn;
+                bool roomOn = GUILayout.Toggle(AudioEngine.RoomOn, "听音室", GUILayout.Width(72));
+                if (roomOn != AudioEngine.RoomOn) AudioEngine.RoomOn = roomOn;
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("指向", GUILayout.Width(30));
+                if (GUILayout.Button("全向", GUILayout.Width(44))) AudioEngine.SetDirectivityPreset(0);
+                if (GUILayout.Button("宽", GUILayout.Width(34))) AudioEngine.SetDirectivityPreset(1);
+                if (GUILayout.Button("标准", GUILayout.Width(44))) AudioEngine.SetDirectivityPreset(2);
+                if (GUILayout.Button("强", GUILayout.Width(34))) AudioEngine.SetDirectivityPreset(3);
+                if (GUILayout.Button("8字", GUILayout.Width(40))) AudioEngine.SetDirectivityFamily(1);
+                GUILayout.EndHorizontal();
+
+                // 朝向已固定为「观众席」（屏幕法线朝观众，世界系固定、不跟随视角），
+                // 所以不再提供调整入口。下面两行保留备查：
+                // GUILayout.BeginHorizontal();
+                // GUILayout.Label("朝向L", GUILayout.Width(42));
+                // if (GUILayout.Button("观众", GUILayout.Width(40))) AudioEngine.AimModeL = 3;
+                // if (GUILayout.Button("听者", GUILayout.Width(40))) AudioEngine.AimModeL = 0;
+                // if (GUILayout.Button("朝前", GUILayout.Width(40))) AudioEngine.AimModeL = 1;
+                // if (GUILayout.Button("手动", GUILayout.Width(40))) AudioEngine.AimModeL = 2;
+                // GUILayout.EndHorizontal();
+                // GUILayout.BeginHorizontal();
+                // GUILayout.Label("朝向R", GUILayout.Width(42));
+                // if (GUILayout.Button("观众", GUILayout.Width(40))) AudioEngine.AimModeR = 3;
+                // if (GUILayout.Button("听者", GUILayout.Width(40))) AudioEngine.AimModeR = 0;
+                // if (GUILayout.Button("朝前", GUILayout.Width(40))) AudioEngine.AimModeR = 1;
+                // if (GUILayout.Button("手动", GUILayout.Width(40))) AudioEngine.AimModeR = 2;
+                // GUILayout.EndHorizontal();
+
+                // 锥形渐变端点：低频 → 高频（锥角半角 / 锥外衰减指数）
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"锥角低{AudioEngine.DirConeLoDeg:F0}°", GUILayout.Width(80));
+                if (GUILayout.Button("-5", GUILayout.Width(32)))
+                {
+                    AudioEngine.DirConeLoDeg = Math.Max(5f, AudioEngine.DirConeLoDeg - 5f);
+                    AudioEngine.ApplyDirectivityGradient();
+                }
+                if (GUILayout.Button("+5", GUILayout.Width(32)))
+                {
+                    AudioEngine.DirConeLoDeg = Math.Min(180f, AudioEngine.DirConeLoDeg + 5f);
+                    AudioEngine.ApplyDirectivityGradient();
+                }
+                GUILayout.Label($"高{AudioEngine.DirConeHiDeg:F0}°", GUILayout.Width(48));
+                if (GUILayout.Button("-5", GUILayout.Width(32)))
+                {
+                    AudioEngine.DirConeHiDeg = Math.Max(5f, AudioEngine.DirConeHiDeg - 5f);
+                    AudioEngine.ApplyDirectivityGradient();
+                }
+                if (GUILayout.Button("+5", GUILayout.Width(32)))
+                {
+                    AudioEngine.DirConeHiDeg = Math.Min(180f, AudioEngine.DirConeHiDeg + 5f);
+                    AudioEngine.ApplyDirectivityGradient();
+                }
+                GUILayout.Label("锥角", GUILayout.Width(34));
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"锐度低{AudioEngine.DirSharpLo:F1}", GUILayout.Width(80));
+                if (GUILayout.Button("-.2", GUILayout.Width(32)))
+                {
+                    AudioEngine.DirSharpLo = Math.Max(0f, AudioEngine.DirSharpLo - 0.2f);
+                    AudioEngine.ApplyDirectivityGradient();
+                }
+                if (GUILayout.Button("+.2", GUILayout.Width(32)))
+                {
+                    AudioEngine.DirSharpLo = Math.Min(4f, AudioEngine.DirSharpLo + 0.2f);
+                    AudioEngine.ApplyDirectivityGradient();
+                }
+                GUILayout.Label($"高{AudioEngine.DirSharpHi:F1}", GUILayout.Width(48));
+                if (GUILayout.Button("-.2", GUILayout.Width(32)))
+                {
+                    AudioEngine.DirSharpHi = Math.Max(0f, AudioEngine.DirSharpHi - 0.2f);
+                    AudioEngine.ApplyDirectivityGradient();
+                }
+                if (GUILayout.Button("+.2", GUILayout.Width(32)))
+                {
+                    AudioEngine.DirSharpHi = Math.Min(4f, AudioEngine.DirSharpHi + 0.2f);
+                    AudioEngine.ApplyDirectivityGradient();
+                }
+                GUILayout.Label("锐度", GUILayout.Width(34));
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("房间", GUILayout.Width(30));
+                if (GUILayout.Button("电视房", GUILayout.Width(54))) AudioEngine.SetRoomSizePreset(0);
+                if (GUILayout.Button("小", GUILayout.Width(30))) AudioEngine.SetRoomSizePreset(1);
+                if (GUILayout.Button("中", GUILayout.Width(30))) AudioEngine.SetRoomSizePreset(2);
+                if (GUILayout.Button("大", GUILayout.Width(30))) AudioEngine.SetRoomSizePreset(3);
+                bool autoFit = GUILayout.Toggle(AudioEngine.RoomAutoFit, "自动", GUILayout.Width(52));
+                if (autoFit != AudioEngine.RoomAutoFit) AudioEngine.RoomAutoFit = autoFit;
+                GUILayout.Label("反射", GUILayout.Width(30));
+                bool reflOn = GUILayout.Toggle(AudioEngine.RoomReflOn, "", GUILayout.Width(20));
+                if (reflOn != AudioEngine.RoomReflOn) AudioEngine.RoomReflOn = reflOn;
+                GUILayout.Label("混响", GUILayout.Width(30));
+                bool revOn = GUILayout.Toggle(AudioEngine.RoomReverbOn, "", GUILayout.Width(20));
+                if (revOn != AudioEngine.RoomReverbOn) AudioEngine.RoomReverbOn = revOn;
+                GUILayout.EndHorizontal();
+
+                // 材料逐表面选（0 地板 / 1 天花板 / 2 四壁）
+                for (int surf = 0; surf < 3; surf++)
+                {
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label(SurfName(surf), GUILayout.Width(38));
+                    int cnt = AudioEngine.SurfaceMatCount(surf);
+                    int cur = AudioEngine.SurfaceMatIndex(surf);
+                    for (int i = 0; i < cnt; i++)
+                    {
+                        // 当前材料用方括号标记，省掉额外状态显示
+                        string nm = AudioEngine.SurfaceMatNameAt(surf, i);
+                        string label = i == cur ? "[" + nm + "]" : nm;
+                        if (GUILayout.Button(label, GUILayout.Width(56)))
+                            AudioEngine.SetSurfaceMat(surf, i);
+                    }
+                    GUILayout.EndHorizontal();
+                }
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"明暗{AudioEngine.RoomDamp:F1}", GUILayout.Width(66));
+                if (GUILayout.Button("-.1", GUILayout.Width(32)))
+                    AudioEngine.RoomDamp = Math.Max(0f, AudioEngine.RoomDamp - 0.1f);
+                if (GUILayout.Button("+.1", GUILayout.Width(32)))
+                    AudioEngine.RoomDamp = Math.Min(1f, AudioEngine.RoomDamp + 0.1f);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"反射{AudioEngine.RoomReflDb:F0}dB", GUILayout.Width(64));
+                if (GUILayout.Button("-2", GUILayout.Width(32))) AudioEngine.RoomReflDb = Math.Max(-30f, AudioEngine.RoomReflDb - 2f);
+                if (GUILayout.Button("+2", GUILayout.Width(32))) AudioEngine.RoomReflDb = Math.Min(6f, AudioEngine.RoomReflDb + 2f);
+                GUILayout.Label($"混响{AudioEngine.RoomReverbDb:F0}dB", GUILayout.Width(68));
+                if (GUILayout.Button("-2", GUILayout.Width(32))) AudioEngine.RoomReverbDb = Math.Max(-40f, AudioEngine.RoomReverbDb - 2f);
+                if (GUILayout.Button("+2", GUILayout.Width(32))) AudioEngine.RoomReverbDb = Math.Min(6f, AudioEngine.RoomReverbDb + 2f);
+                GUILayout.Label($"RT60≈{AudioEngine.RoomRt60Mid:F2}s", GUILayout.Width(84));
+                GUILayout.Label($"{AudioEngine.RoomW:F1}×{AudioEngine.RoomD:F1}×{AudioEngine.RoomH:F1}m",
+                    GUILayout.Width(96));
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"反射高度{AudioEngine.TvHeightM:F1}m", GUILayout.Width(80));
+                if (GUILayout.Button("-0.1", GUILayout.Width(40)))
+                    AudioEngine.TvHeightM = Math.Max(0.6f, AudioEngine.TvHeightM - 0.1f);
+                if (GUILayout.Button("+0.1", GUILayout.Width(40)))
+                    AudioEngine.TvHeightM = Math.Min(4.0f, AudioEngine.TvHeightM + 0.1f);
+                GUILayout.Label($"（仅房间反射用：声源比耳朵高{AudioEngine.SourceRiseM:F1}m，耳高{AudioEngine.EarHeightM:F1}m）",
+                    GUILayout.Width(220));
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"屏幕正面 {(AudioEngine.ScreenFrontSign > 0f ? "+Y" : "−Y")}",
+                    GUILayout.Width(110));
+                if (GUILayout.Button("翻转正面", GUILayout.Width(70)))
+                    AudioEngine.ScreenFrontSign = -AudioEngine.ScreenFrontSign;
+                GUILayout.Label("（屏幕局部轴；箭头指向若反了就翻一次）", GUILayout.Width(200));
+                GUILayout.EndHorizontal();
+
+                GUILayout.Label("提示：箭头=固定朝向（两箱平行、屏幕法线朝观众，不随视角转）");
             }
 
             // 增益细调（滑条之外的文本框与步进）
@@ -154,6 +313,16 @@ namespace VirtualStereo
             GUILayout.Label($"峰值={AudioEngine.LastPeak:F2}", GUILayout.Width(96));
             GUILayout.EndHorizontal();
             SyncGainText();
+
+            // 延迟诊断：环电平（读门槛）+ 渲染前置（写指针领先播放头）
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"延迟 环{AudioEngine.RingLevelMs}ms 前置{AudioEngine.RenderLeadMs}ms(实测{AudioEngine.LeadMs}ms) 欠载{AudioEngine.Underruns}",
+                GUILayout.Width(300));
+            if (GUILayout.Button("-10", GUILayout.Width(36)))
+                AudioEngine.RenderLeadMs = Math.Max(20, AudioEngine.RenderLeadMs - 10);
+            if (GUILayout.Button("+10", GUILayout.Width(36)))
+                AudioEngine.RenderLeadMs = Math.Min(200, AudioEngine.RenderLeadMs + 10);
+            GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("恢复自动", GUILayout.Width(90)))
@@ -208,6 +377,7 @@ namespace VirtualStereo
 
             AudioEngine.GetPositions(out var cl, out var cr, out var listener);
             GUILayout.Label($"L={Fmt(cl)}   R={Fmt(cr)}");
+            GUILayout.Label($"朝向 L={Fmt(AudioEngine.AimDirWorld(0))}  R={Fmt(AudioEngine.AimDirWorld(1))}");
             GUILayout.Label($"听者={Fmt(listener)}");
             if (_status.Length > 0) GUILayout.Label(_status);
             GUILayout.EndVertical();
@@ -264,22 +434,6 @@ namespace VirtualStereo
             }
         }
 
-        private static void SwitchMode(AudioEngine.SpatialMode m)
-        {
-            if (AudioEngine.SetMode(m)) _status = "模式: " + ModeName();
-            else _status = "双耳引擎初始化失败（phonon.dll 在游戏目录吗？）";
-        }
-
-        private static string ModeName()
-        {
-            switch (AudioEngine.Mode)
-            {
-                case AudioEngine.SpatialMode.FullHrtf: return "双耳 HRTF（ITD+ILD+耳廓）";
-                case AudioEngine.SpatialMode.ItdIld: return "ITD+ILD（无耳廓频谱）";
-                default: return "双音箱对（Unity 3D panning 对照）";
-            }
-        }
-
         private static void RefreshFields()
         {
             AudioEngine.GetPositions(out var l, out var r, out _);
@@ -300,7 +454,19 @@ namespace VirtualStereo
 
         private static string F(float v) => v.ToString("F2", CultureInfo.InvariantCulture);
 
+        /// <summary>表面名（与 RoomModel 的表面序一致：0 地板 / 1 天花板 / 2 四壁）。</summary>
+        private static string SurfName(int surface)
+        {
+            switch (surface)
+            {
+                case 0: return "地板";
+                case 1: return "天花";
+                default: return "四壁";
+            }
+        }
+
         private static string Fmt(Vector3 v) =>
             $"({v.x.ToString("F1", CultureInfo.InvariantCulture)},{v.y.ToString("F1", CultureInfo.InvariantCulture)},{v.z.ToString("F1", CultureInfo.InvariantCulture)})";
     }
 }
+#endif

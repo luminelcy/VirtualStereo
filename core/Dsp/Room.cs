@@ -189,6 +189,8 @@ namespace VirtualStereo.Dsp
     internal sealed class RoomRenderer
     {
         public volatile bool Enabled;
+        public volatile bool ReflOn = true;    // 一次反射（早期反射）
+        public volatile bool ReverbOn = true;  // FDN 混响尾
         public volatile float ReflDb = -6f;    // 早期反射电平（相对直达）
         public volatile float ReverbDb = -12f; // 混响电平
         public volatile float Damp = 0.4f;     // 混响明暗（0 亮 .. 1 暗）
@@ -224,31 +226,35 @@ namespace VirtualStereo.Dsp
             int frames, int rate,
             float azL, float elL, float distL, float azR, float elR, float distR)
         {
-            Model.ComputePaths(azL, elL, distL, azR, elR, distR, _paths);
-            RefreshTargets(rate);
-            RefreshGammas();
-
-            float reflG = (float)Math.Pow(10.0, ReflDb / 20.0);
-            for (int i = 0; i < frames; i++)
+            // 反射路径几何：每块重算（纯数学，12 条路径），玩家转头/移动只是换数值
+            if (ReflOn)
             {
-                float sl = monoL[i], sr = monoR[i];
-                float accL = 0f, accR = 0f;
-                for (int p = 0; p < RoomModel.MaxPaths; p++)
+                Model.ComputePaths(azL, elL, distL, azR, elR, distR, _paths);
+                RefreshTargets(rate);
+                RefreshGammas();
+
+                float reflG = (float)Math.Pow(10.0, ReflDb / 20.0);
+                for (int i = 0; i < frames; i++)
                 {
-                    float s = p < RoomModel.Walls ? sl : sr;
-                    int surf = _surfOf[p];
-                    // 按命中表面的材料吸收着色（低/中/高 Γ）
-                    float sf = _filt[p].Process(s,
-                        _gamma[surf, 0], _gamma[surf, 1], _gamma[surf, 2], rate);
-                    accL += _gain[p, 0] * _delay[p * 2].Process(sf, _dlyT[p, 0]);
-                    accR += _gain[p, 1] * _delay[p * 2 + 1].Process(sf, _dlyT[p, 1]);
+                    float sl = monoL[i], sr = monoR[i];
+                    float accL = 0f, accR = 0f;
+                    for (int p = 0; p < RoomModel.MaxPaths; p++)
+                    {
+                        float s = p < RoomModel.Walls ? sl : sr;
+                        int surf = _surfOf[p];
+                        // 按命中表面的材料吸收着色（低/中/高 Γ）
+                        float sf = _filt[p].Process(s,
+                            _gamma[surf, 0], _gamma[surf, 1], _gamma[surf, 2], rate);
+                        accL += _gain[p, 0] * _delay[p * 2].Process(sf, _dlyT[p, 0]);
+                        accR += _gain[p, 1] * _delay[p * 2 + 1].Process(sf, _dlyT[p, 1]);
+                    }
+                    earsInterleaved[i * 2] += accL * reflG;
+                    earsInterleaved[i * 2 + 1] += accR * reflG;
                 }
-                earsInterleaved[i * 2] += accL * reflG;
-                earsInterleaved[i * 2 + 1] += accR * reflG;
             }
 
             float revG = (float)Math.Pow(10.0, ReverbDb / 20.0);
-            if (revG > 1e-4f)
+            if (ReverbOn && revG > 1e-4f)
             {
                 if (_revL == null || _revL.Length < frames)
                 {

@@ -8,7 +8,6 @@
 // F9 = 总开关（关闭时恢复原声直出）。日志含 RMS 巡检，用于观察静音实验结果。
 using System;
 using System.Collections.Generic;
-using Il2CppInterop.Runtime.Injection;
 using MelonLoader;
 using UnityEngine;
 using VirtualStereo.Capture;
@@ -22,6 +21,7 @@ namespace VirtualStereo
     public class Core : MelonMod
     {
         private static bool _enabled = true;
+        private static bool _silenced;   // 原声是否已被压到 ε（只有双耳引擎就绪后才做）
         private static bool _inputBroken;
         private static ProcessLoopbackCapture _capture;
         private static int _bridgePid = -1;
@@ -34,17 +34,6 @@ namespace VirtualStereo
             VsLog.OnInfo = m => MelonLogger.Msg(m);
             VsLog.OnError = m => MelonLogger.Error(m);
 
-            bool injected = false;
-            try
-            {
-                ClassInjector.RegisterTypeInIl2Cpp<VirtualStereoChannel>();
-                injected = true;
-            }
-            catch (Exception e)
-            {
-                MelonLogger.Warning("[VirtualStereo] 注入组件失败（将用 SetData 兜底泵，无低延迟路径）: " + e.Message);
-            }
-            AudioEngine.SetInjectionAvailable(injected);
             // MelonLogger.Msg("[VirtualStereo] 已加载：F9 = 虚拟立体声开关");
         }
 
@@ -56,8 +45,10 @@ namespace VirtualStereo
                 {
                     if (Input.GetKeyDown(KeyCode.F9))
                         Toggle();
+#if VS_DEV
                     if (Input.GetKeyDown(KeyCode.F10))
                         DebugMenu.Toggle();
+#endif
                 }
                 catch (Exception e)
                 {
@@ -69,6 +60,14 @@ namespace VirtualStereo
             if (!_enabled) return;
 
             long now = Environment.TickCount64;
+
+            // 双耳引擎刚就绪就立刻压原声（晚了会有一小段原声+双耳声叠加）
+            if (!_silenced && _capture != null && AudioEngine.HrtfReady)
+            {
+                _silenced = true;
+                try { _capture.RefreshSilence(0.001f); } catch { }
+            }
+
             if (now >= _nextBridgeScanAt)
             {
                 _nextBridgeScanAt = now + 2000;
@@ -92,7 +91,7 @@ namespace VirtualStereo
         private static void Toggle()
         {
             _enabled = !_enabled;
-            // MelonLogger.Msg("[VirtualStereo] " + (_enabled ? "开" : "关（恢复原声直出）"));
+            MelonLogger.Msg("[VirtualStereo] F9: " + (_enabled ? "开" : "关（已恢复原声直出）"));
             if (!_enabled)
             {
                 ReleaseCapture();
@@ -117,8 +116,13 @@ namespace VirtualStereo
             }
             if (bridge == _bridgePid && _capture != null)
             {
-                // 视频声音的会话是播视频时才出现的——周期性补压 ε 并同步补偿增益
-                _capture.RefreshSilence(0.001f);
+                // 只有双耳引擎真的就绪了才去压原声——否则游戏会静音又没人补声。
+                // 视频声音的会话是播视频时才出现的，所以周期性补压 ε 并同步补偿增益。
+                if (AudioEngine.HrtfReady)
+                {
+                    _capture.RefreshSilence(0.001f);
+                    _silenced = true;
+                }
                 return;
             }
 
@@ -136,10 +140,7 @@ namespace VirtualStereo
                 _consecutiveCaptureFails = 0;
                 // MelonLogger.Msg(
                     // $"[VirtualStereo] 捕获已启动: bridge pid={bridgePid}, {_capture.SampleRate}Hz x {_capture.CaptureChannels}ch");
-
-                int silenced = _capture.RefreshSilence(0.001f);
-                // MelonLogger.Msg($"[VirtualStereo] ε 音量消双响: {silenced} 个会话压到 0.001" +
-                    // (silenced > 0 ? $"（补偿增益 x{_capture.OutputGain:F0}）" : "（暂无音频会话，等视频开播后 2s 内自动补压）"));
+                _silenced = false; // 等双耳引擎就绪（OnUpdate 里立刻补压，不等下一次扫描）
             }
             catch (Exception e)
             {
@@ -159,10 +160,12 @@ namespace VirtualStereo
                 try { _capture.Dispose(); } catch { }
                 _capture = null;
             }
+            _silenced = false;
         }
 
         public override void OnGUI()
         {
+#if VS_DEV
             try
             {
                 DebugMenu.Draw();
@@ -173,6 +176,7 @@ namespace VirtualStereo
                 MelonLogger.Error("[VirtualStereo] 调试菜单渲染失败: " + e);
                 DebugMenu.Visible = false;
             }
+#endif
         }
 
         public override void OnSceneWasLoaded(int buildIndex, string sceneName)
