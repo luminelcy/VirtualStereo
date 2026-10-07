@@ -12,7 +12,7 @@ namespace VirtualStereo.Phonon
 {
     public static class BinauralEngine
     {
-        /// <summary>虚拟声源数上限（三对＝6，留余量）。</summary>
+        /// <summary>虚拟声源数上限（三对＝6，留余量；开多屏时按"主三对+其余各一对"估）。</summary>
         public const int MaxSources = 8;
 
         public static bool Initialized { get; private set; }

@@ -28,7 +28,7 @@ namespace VirtualStereo
 
         // ── 面板几何 ──
         private const float PanelW = 408f;
-        private const float PanelH = 827f;
+        private const float PanelH = 897f;
         private const float TitleH = 30f;
         private const float ManualZoneH = 72f; // 标题 + 增益滑条区（手绘），其下是 GUILayout 区
 
@@ -135,18 +135,28 @@ namespace VirtualStereo
 
                 // ── 三对虚拟音箱（面声源）：0 上 / 1 中 / 2 下 ──
                 GUILayout.BeginHorizontal();
-                GUILayout.Label("三层", GUILayout.Width(30));
-                for (int row = 0; row < 3; row++)
+                GUILayout.Label("四对", GUILayout.Width(30));
+                string[] rowNames = { "上外", "上内", "下内", "下外" };
+                for (int row = 0; row < 4; row++)
                 {
                     bool on = GUILayout.Toggle(AudioEngine.RowEnabled(row),
-                        row == 0 ? "上" : (row == 1 ? "中" : "下"), GUILayout.Width(34));
+                        rowNames[row], GUILayout.Width(40));
                     if (on != AudioEngine.RowEnabled(row)) AudioEngine.SetRowEnabled(row, on);
                 }
-                GUILayout.Label($"层间距{AudioEngine.RowDyM:F2}m", GUILayout.Width(84));
+                GUILayout.EndHorizontal();
+
+                // 内外层间距分开调
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"外间距{AudioEngine.RowOuterDyM:F2}m", GUILayout.Width(88));
                 if (GUILayout.Button("-", GUILayout.Width(24)))
-                    AudioEngine.RowDyM = Math.Max(0f, AudioEngine.RowDyM - 0.05f);
+                    AudioEngine.RowOuterDyM = Math.Max(0f, AudioEngine.RowOuterDyM - 0.05f);
                 if (GUILayout.Button("+", GUILayout.Width(24)))
-                    AudioEngine.RowDyM = Math.Min(1f, AudioEngine.RowDyM + 0.05f);
+                    AudioEngine.RowOuterDyM = Math.Min(2f, AudioEngine.RowOuterDyM + 0.05f);
+                GUILayout.Label($"内间距{AudioEngine.RowInnerDyM:F2}m", GUILayout.Width(88));
+                if (GUILayout.Button("-", GUILayout.Width(24)))
+                    AudioEngine.RowInnerDyM = Math.Max(0f, AudioEngine.RowInnerDyM - 0.05f);
+                if (GUILayout.Button("+", GUILayout.Width(24)))
+                    AudioEngine.RowInnerDyM = Math.Min(2f, AudioEngine.RowInnerDyM + 0.05f);
                 GUILayout.EndHorizontal();
 
                 GUILayout.BeginHorizontal();
@@ -376,11 +386,16 @@ namespace VirtualStereo
 
             // 延迟诊断：采集环电平（读门槛）+ 设备缓冲深度 + 设备欠载次数。
             // 音频不再经 Unity：出声在音频线程上直接写声卡，所以这里没有"渲染前置"这个旋钮了。
-            GUILayout.BeginHorizontal();
-            GUILayout.Label($"延迟 采集环{AudioEngine.CaptureBufferMs}ms 设备缓冲{AudioEngine.OutFillMs}ms 设备欠载{AudioEngine.OutUnderruns}",
-                GUILayout.Width(300));
-            GUILayout.Label($"门槛{AudioEngine.PreRollLowMs}/{AudioEngine.PreRollHighMs}ms", GUILayout.Width(100));
-            GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"延迟 采集环{AudioEngine.CaptureBufferMs}ms 设备缓冲{AudioEngine.OutFillMs}ms 设备欠载{AudioEngine.OutUnderruns}",
+                    GUILayout.Width(300));
+                GUILayout.Label($"门槛{AudioEngine.PreRollLowMs}/{AudioEngine.PreRollHighMs}ms", GUILayout.Width(100));
+                GUILayout.EndHorizontal();
+
+            // ── watch party：房间里可能有多台投影，但只让**离摄像头最近的那台**发声 ──
+            GUILayout.Label($"watch party {AudioEngine.ScreenCount} 台，只从最近那台发声");
+            for (int i = 0; i < AudioEngine.ActiveScreenCount; i++)
+                GUILayout.Label("  " + AudioEngine.ActiveScreenLabel(i));
 
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("恢复自动", GUILayout.Width(90)))

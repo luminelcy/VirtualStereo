@@ -30,12 +30,26 @@ namespace VirtualStereo
         // 代价是音频线程上 HRTF/Room 的调用次数翻倍（每块固定开销），
         // 复核指标：面板「设备欠载」是否仍然不涨。
         private const int Block = 512;
-        // ── 三对虚拟音箱（6 个声源）：0/1 = 上排（外），2/3 = 中排（内），4/5 = 下排（外）──
-        // 真实电视是"面声源"：垂直铺开几乎不糊水平声像，却能带来"一整块板子"的感觉。
-        // 每层用 M/S 分权：M 主要给中间那层（实心），S 主要给上下两层（铺开），
-        // 这样既避免同一信号多路相干叠加的梳状染色，又能单独调"宽度"。
-        public const int RowCount = 3;
+        // ── 四对虚拟音箱（8 个声源）= 2×2 网格：外侧上下两对 + 内侧上下两对 ──
+        // 层序：0/1 上外，2/3 上内，4/5 下内，6/7 下外。
+        // 真实电视是"面声源"：垂直方向铺开几乎不糊水平声像，却能带来"一整块板子"的
+        // 立体感。M 走外侧两对（4 只），S 走内侧两对（4 只）——两路各自都有纵向延展，
+        // 于是形成真正的"面"，而不是一条线。两路的增益总和保持不变（M 仍 1.7、S 仍 1.15）。
+        public const int RowCount = 4;
         public const int SrcCount = RowCount * 2;
+
+        // ── 多台 watch party：同一房间里的投影放的是同一个网页，音频只有一路。
+        // 现在**只让离摄像头（AudioListener）最近的那台发声**，其余投影完全不出声——
+        // 多台同时响会把声像糊掉，单台定位才干净。以后想改成"全部一起响"，
+        // 把 MaxScreens 改成 4 即可（代码里已经支持"主投影三对 + 其余各一对"）。
+        public const int MaxScreens = 1;
+        public const int MaxSrcTotal = SrcCount + (MaxScreens - 1) * 2;   // 现在 = 6
+        private static readonly Transform[] _activeScreens = new Transform[MaxScreens];
+        private static int _activeScreenCount;
+
+        /// <summary>次投影（除主投影外的其他 watch party）的电平——MaxScreens=1 时用不到，
+        /// 留作以后开多屏时的旋钮。</summary>
+        public static float SecondaryScreenGain { get; set; } = 0.6f;
         private static readonly float[] _blockL = new float[Block];
         private static readonly float[] _blockR = new float[Block];
         private static readonly float[] _blockStereo = new float[Block * 2];
@@ -46,43 +60,63 @@ namespace VirtualStereo
         private const int RoomTailMs = 600;
 
         // ── 主线程写、音频线程读的空间快照（Unity 的 Transform 只能在主线程读）──
-        private static readonly SaiVector3[] _snapDir = new SaiVector3[SrcCount];
+        private static readonly SaiVector3[] _snapDir = new SaiVector3[MaxSrcTotal];
         private static readonly float[][] _srcBuf = NewSrcBufs();
         private static readonly float[] _roomL = new float[Block];
         private static readonly float[] _roomR = new float[Block];
 
         private static float[][] NewSrcBufs()
         {
-            var b = new float[SrcCount][];
-            for (int i = 0; i < SrcCount; i++) b[i] = new float[Block];
+            var b = new float[MaxSrcTotal][];
+            for (int i = 0; i < MaxSrcTotal; i++) b[i] = new float[Block];
             return b;
         }
         // 每源一份快照（6 个声源：row*2+ch）
-        private static readonly float[] _posX = new float[SrcCount];
-        private static readonly float[] _posY = new float[SrcCount];
-        private static readonly float[] _posZ = new float[SrcCount];
-        private static readonly float[] _srcAz = new float[SrcCount];
-        private static readonly float[] _srcEl = new float[SrcCount];
-        private static readonly float[] _srcDist = new float[SrcCount];
-        private static readonly int[] _srcAimMode = new int[SrcCount];
-        private static readonly float[] _srcAimAz = new float[SrcCount];
-        private static readonly float[] _srcAimEl = new float[SrcCount];
+        private static readonly float[] _posX = new float[MaxSrcTotal];
+        private static readonly float[] _posY = new float[MaxSrcTotal];
+        private static readonly float[] _posZ = new float[MaxSrcTotal];
+        private static readonly int[] _srcRow = new int[MaxSrcTotal];   // 层号；−1 = 次投影的单对
+        private static readonly int[] _srcCh = new int[MaxSrcTotal];    // 0 = 左, 1 = 右
+        private static readonly int[] _srcScreenIdx = new int[MaxSrcTotal]; // 属于第几台投影
+        private static readonly float[] _srcAz = new float[MaxSrcTotal];
+        private static readonly float[] _srcEl = new float[MaxSrcTotal];
+        private static readonly float[] _srcDist = new float[MaxSrcTotal];
+        private static readonly int[] _srcAimMode = new int[MaxSrcTotal];
+        private static readonly float[] _srcAimAz = new float[MaxSrcTotal];
+        private static readonly float[] _srcAimEl = new float[MaxSrcTotal];
+        private static int _activeSrcCount;
 
-        // ── 三对音箱的布局参数（面板可调）──
-        private static readonly bool[] RowOn = { true, true, true };
-        /// <summary>上下两层相对屏幕中心的垂直偏移（米）。</summary>
-        public static float RowDyM { get; set; } = 0.8f;
-        /// <summary>中间那层的横向比例（1 = 与上下同宽；越小越靠内侧）。</summary>
+        // ── 四对音箱的布局参数（面板可调）──
+        private static readonly bool[] RowOn = { true, true, true, true };
+        /// <summary>外侧两对相对屏幕中心的垂直偏移（米，上下各 ±）。</summary>
+        public static float RowOuterDyM { get; set; } = 0.95f;
+        /// <summary>内侧两对相对屏幕中心的垂直偏移（米，上下各 ±）——与外侧分开调。</summary>
+        public static float RowInnerDyM { get; set; } = 0.7f;
+        /// <summary>内侧两对的横向比例（1 = 与外侧同宽；越小越靠内侧）。</summary>
         public static float RowInnerScale { get; set; } = 1.2f;
-        /// <summary>上下两层的横向比例（1 = 屏幕半宽 × 0.85 的原始间距）。</summary>
+        /// <summary>外侧两对的横向比例（1 = 屏幕半宽 × 0.85 的原始间距）。</summary>
         public static float RowOuterScale { get; set; } = 0.9f;
-        /// <summary>上下两层朝外偏的方位角（度，0 = 与中间一样朝观众）。</summary>
+        /// <summary>外侧两对朝外偏的方位角（度，0 = 与内侧一样朝观众）。</summary>
         public static float RowOuterAimDeg { get; set; } = 0f;
-        /// <summary>每层的 M 增益（实心程度）与 S 增益（铺开程度）。
-        /// 当前默认（实测选定）：上下两层出 M 为主、中间那层出 S 为主
-        /// —— 声像实体由屏幕上下缘撑着，宽度由中间那对铺。ΣM=1.7、ΣS=1.15。</summary>
-        public static readonly float[] RowGainM = { 0.80f, 0.10f, 0.80f };
-        public static readonly float[] RowGainS = { 0.15f, 0.85f, 0.15f };
+        /// <summary>每对的 M 增益（实心程度）与 S 增益（铺开程度）。
+        /// 外侧两对出 M（各 0.80），内侧两对出 S（各 0.425）——
+        /// 与原来"三对"实测值等价（M 总和 1.7、S 总和 1.15），只是把中置那一路
+        /// 由一对拆成上下两对，让 S 也有纵向延展。</summary>
+        public static readonly float[] RowGainM = { 0.60f, 0.05f, 0.05f, 0.60f };
+        public static readonly float[] RowGainS = { 0.10f, 0.50f, 0.50f, 0.10f };
+
+        /// <summary>第 row 对的横向比例（内侧两对用 RowInnerScale）。</summary>
+        private static float RowScaleFor(int row) => (row == 1 || row == 2) ? RowInnerScale : RowOuterScale;
+
+        /// <summary>第 row 对的垂直偏移（上面两对取正、下面两对取负；内外各自一套值）。</summary>
+        private static float RowDyFor(int row)
+        {
+            float dy = RowIsInner(row) ? RowInnerDyM : RowOuterDyM;
+            return (row == 0 || row == 1) ? dy : -dy;
+        }
+
+        /// <summary>是否内侧那两对（它们的朝向不额外外偏）。</summary>
+        private static bool RowIsInner(int row) => row == 1 || row == 2;
 
         // 面板用的访问器（外层 = 上/下两排，共用一组增益）
         public static bool RowEnabled(int row) => row >= 0 && row < RowCount && RowOn[row];
@@ -93,22 +127,22 @@ namespace VirtualStereo
         public static float MidGainM
         {
             get => RowGainM[1];
-            set => RowGainM[1] = ClampF(value, 0f, 1.5f);
+            set { RowGainM[1] = RowGainM[2] = ClampF(value, 0f, 1.5f); }
         }
         public static float MidGainS
         {
             get => RowGainS[1];
-            set => RowGainS[1] = ClampF(value, 0f, 1.5f);
+            set { RowGainS[1] = RowGainS[2] = ClampF(value, 0f, 1.5f); }
         }
         public static float OuterGainM
         {
             get => RowGainM[0];
-            set { RowGainM[0] = RowGainM[2] = ClampF(value, 0f, 1.5f); }
+            set { RowGainM[0] = RowGainM[3] = ClampF(value, 0f, 1.5f); }
         }
         public static float OuterGainS
         {
             get => RowGainS[0];
-            set { RowGainS[0] = RowGainS[2] = ClampF(value, 0f, 1.5f); }
+            set { RowGainS[0] = RowGainS[3] = ClampF(value, 0f, 1.5f); }
         }
 
         /// <summary>读门槛（毫秒）：环电平掉到「低」以下出静音保护，回到「高」以上才恢复读。</summary>
@@ -152,7 +186,7 @@ namespace VirtualStereo
 
         private static DirectivityState[] NewDirStates()
         {
-            var a = new DirectivityState[SrcCount];
+            var a = new DirectivityState[MaxSrcTotal];
             for (int i = 0; i < SrcCount; i++) a[i] = new DirectivityState();
             return a;
         }
@@ -206,9 +240,9 @@ namespace VirtualStereo
 
         private static RoomRenderer NewRoom()
         {
-            // 默认电平与明暗：反射 −10dB / 混响 −15dB / 明亮度 0.7（类默认是 −6/−12/0.4，
+            // 默认电平与明暗：反射 −10dB / 混响 −15dB / 明亮度 0.6（类默认是 −6/−12/0.4，
             // 这里按实测结论覆盖：尾巴收得更快、更暗，贴近软装客厅）
-            var r = new RoomRenderer { Enabled = true, ReflDb = -10f, ReverbDb = -15f, Damp = 0.7f };
+            var r = new RoomRenderer { Enabled = true, ReflDb = -10f, ReverbDb = -15f, Damp = 0.6f };
             // 默认按 mac 版「电视房」：3.8 × 3.8 地板 × 5.0 层高，听者在正中
             // → 电视墙离听者 1.9m（就是"电视挂在 2m 位置"那个设定）。
             var m = r.Model;
@@ -239,9 +273,10 @@ namespace VirtualStereo
         /// <summary>某虚拟声源当前朝向的世界系单位向量（图形标注与调试读数用）。</summary>
         public static Vector3 AimDirWorld(int src)
         {
-            int row = src / 2, ch = src % 2;
-            float outDeg = row == 1 ? 0f : RowOuterAimDeg;
-            return AimWorldForRow(row, ch, outDeg);
+            if (src < 0 || src >= _activeSrcCount) return new Vector3(0f, 0f, 1f);
+            int row = _srcRow[src];
+            float outDeg = row < 0 || RowIsInner(row) ? 0f : RowOuterAimDeg;
+            return AimWorldForScreen(_activeScreens[_srcScreenIdx[src]], row, _srcCh[src], outDeg);
         }
 
         /// <summary>世界系方向 → 头坐标方位/仰角（度）。</summary>
@@ -302,6 +337,8 @@ namespace VirtualStereo
         // 替代旧的固定 125ms——那是"暂停/跳转多久才响应"的主体。
 
         private static long _nextListenerScanAt;  // AudioListener 是整场扫描，别每帧找
+        private static readonly System.Collections.Generic.List<Transform> _screens =
+            new System.Collections.Generic.List<Transform>();
 
         /// <summary>听音室：一次反射 + FDN 混响尾（只在双耳模式下有输出缓冲可用）。</summary>
         public static bool RoomOn
@@ -549,8 +586,8 @@ namespace VirtualStereo
             Vector3 ux = NormV(inner.x, inner.y, inner.z);
             for (int row = 0; row < RowCount; row++)
             {
-                float half = row == 1 ? halfInner : halfOuter;
-                float dy = row == 0 ? RowDyM : (row == 2 ? -RowDyM : 0f);
+                float half = RowIsInner(row) ? halfInner : halfOuter;
+                float dy = RowDyFor(row);
                 _posX[row * 2] = mid.x - ux.x * half;
                 _posY[row * 2] = mid.y - ux.y * half + dy;
                 _posZ[row * 2] = mid.z - ux.z * half;
@@ -576,7 +613,7 @@ namespace VirtualStereo
             {
                 _markersOn = value;
                 EnsureMarkers();
-                for (int s = 0; s < SrcCount; s++)
+                for (int s = 0; s < MaxSrcTotal; s++)
                 {
                     if (_marker[s] != null) _marker[s].SetActive(value);
                     if (_aimArrow[s] != null) _aimArrow[s].SetActive(value);
@@ -588,13 +625,13 @@ namespace VirtualStereo
         {
             if (!_markersOn) return;
 
-            for (int s = 0; s < SrcCount; s++)
+            for (int s = 0; s < _activeSrcCount; s++)
             {
-                int row = s / 2, ch = s % 2;
+                int row = _srcRow[s], ch = _srcCh[s];
                 var pos = new Vector3(_posX[s], _posY[s], _posZ[s]);
                 Color col = ch == 0 ? new Color(0.25f, 0.55f, 1f) : new Color(1f, 0.35f, 0.3f);
-                // 中间那对最亮，上下两层暗一点（便于分辨三对）
-                float shade = row == 1 ? 1f : 0.6f;
+                // 内侧两对最亮（它们出 S、是"面"的主体）、外侧两对暗一点；次投影再暗一档
+                float shade = row < 0 ? 0.35f : (RowIsInner(row) ? 1f : 0.6f);
                 col = new Color(col.r * shade, col.g * shade, col.b * shade);
 
                 if (_marker[s] == null) _marker[s] = MakeMarker($"VS_Marker_{s}", col);
@@ -716,6 +753,8 @@ namespace VirtualStereo
         public static void AttachCapture(ProcessLoopbackCapture capture)
         {
             _capture = capture;
+            _screen = null;      // 重新挑一次目标（离摄像头最近那台）
+            ScanScreens();
             StartAudio();
         }
 
@@ -732,6 +771,11 @@ namespace VirtualStereo
         {
             if (_capture == null) return;
             long now = NowMs;
+
+            // 屏幕只在"还没有目标"时扫一次；不做周期重扫——周期重扫会在走动时
+            // 自动换台（跨过两台投影中点就跳），也会白白整场遍历。目标被销毁时
+            // Unity 的 null 判定会让这里重新扫一次。
+            if (_screen == null) ScanScreens();
 
             EnsureMarkers();
             SnapshotSpatial();
@@ -786,8 +830,10 @@ namespace VirtualStereo
                 _listener = al != null ? al.transform : null;
             }
 
-            // 6 个声源各算一份：方向（头坐标单位向量）、方位/仰角/距离、朝向角
-            for (int s = 0; s < SrcCount; s++)
+            // 每个虚拟声源各算一份：方向（头坐标单位向量）、方位/仰角/距离、朝向角
+            int n = _activeSrcCount;
+            if (n <= 0) return;
+            for (int s = 0; s < n; s++)
             {
                 var p = new Vector3(_posX[s], _posY[s], _posZ[s]);
                 Vector3 dir = HeadDirV(p, out float dist);
@@ -796,11 +842,12 @@ namespace VirtualStereo
                 _srcAz[s] = (float)(Math.Atan2(dir.x, dir.z) * 180.0 / Math.PI);
                 _srcEl[s] = (float)(Math.Asin(ClampF(dir.y, -1f, 1f)) * 180.0 / Math.PI);
 
-                // 朝向：中间层朝观众（屏幕法线），上下两层各朝外偏 RowOuterAimDeg
-                int row = s / 2;
-                int ch = s % 2; // 0 = 左, 1 = 右
-                float outDeg = row == 1 ? 0f : RowOuterAimDeg;
-                Vector3 aim = AimWorldForRow(row, ch, outDeg);
+                // 朝向：中间层朝观众（屏幕法线），上下两层各朝外偏 RowOuterAimDeg；
+                // 次投影只有一对，朝它自己的观众侧（偏移 0）
+                int row = _srcRow[s];
+                int ch = _srcCh[s];
+                float outDeg = row < 0 || RowIsInner(row) ? 0f : RowOuterAimDeg;
+                Vector3 aim = AimWorldForScreen(_activeScreens[_srcScreenIdx[s]], row, ch, outDeg);
                 HeadAngles(aim, out float aaz, out float ael);
                 _srcAimMode[s] = 2; // 手动角度分支
                 _srcAimAz[s] = aaz;
@@ -809,7 +856,7 @@ namespace VirtualStereo
 
             if (_room.Enabled && RoomAutoFit)
             {
-                float dMax = Math.Max(_srcDist[2], _srcDist[3]); // 用中间那层代表"视距"
+                float dMax = Math.Max(_srcDist[2], _srcDist[3]); // 用内侧那对（近屏幕中心）代表"视距"
                 if (Math.Abs(dMax - _autoFitDist) > 0.3f)
                 {
                     _autoFitDist = dMax;
@@ -820,10 +867,10 @@ namespace VirtualStereo
 
         /// <summary>某一层某个声道的朝向（世界系）：屏幕法线绕"面板上轴"外偏 outDeg。
         /// 左声道往外偏 = 朝屏幕左侧转，右声道对称。</summary>
-        private static Vector3 AimWorldForRow(int row, int ch, float outDeg)
+        private static Vector3 AimWorldForScreen(Transform screen, int row, int ch, float outDeg)
         {
-            if (_screen == null) return new Vector3(0f, 0f, 1f);
-            ScreenFrame(_screen, out Vector3 normal, out Vector3 right, out _);
+            if (screen == null) return new Vector3(0f, 0f, 1f);
+            ScreenFrame(screen, out Vector3 normal, out Vector3 right, out _);
             float a = outDeg * (float)Math.PI / 180f;
             float c = (float)Math.Cos(a), s = (float)Math.Sin(a);
             float sign = ch == 0 ? -1f : 1f;
@@ -973,12 +1020,25 @@ namespace VirtualStereo
                 // 三对音箱的输入用 M/S 分权合成：M=(L+R)/2 实心、S=(L−R)/2 铺开。
                 // M 主要给中间那层、S 主要给上下两层——既避免同一信号多路相干叠加的
                 // 梳状染色，又能单独调"宽度"。
-                for (int s = 0; s < SrcCount; s++)
+                int n = _activeSrcCount;
+                for (int s = 0; s < n; s++)
                 {
-                    int row = s / 2, ch = s % 2;
-                    float gm = RowOn[row] ? RowGainM[row] : 0f;
-                    float gs = RowOn[row] ? RowGainS[row] : 0f;
-                    float side = ch == 0 ? -1f : 1f;   // 左声道取 −S
+                    int row = _srcRow[s];
+                    float gm, gs;
+                    if (row < 0)
+                    {
+                        // 次投影：一对，直接吃整份 L/R（同一网页音频从这块投影也发出来）
+                        gm = gs = SecondaryScreenGain;
+                    }
+                    else
+                    {
+                        gm = RowOn[row] ? RowGainM[row] : 0f;
+                        gs = RowOn[row] ? RowGainS[row] : 0f;
+                    }
+                    // 左箱拿 M+S、右箱拿 M−S —— 因为 L = M+S、R = M−S，
+                    // 这样"这只箱子在屏幕左边"与"它放的是 L 内容"才对得上。
+                    // （原来写成 −S / +S，等于把左右内容对调了。）
+                    float side = _srcCh[s] == 0 ? 1f : -1f;
                     float distG = DistanceOn ? RefDistM / Math.Max(0.3f, _srcDist[s]) : 1f;
                     float[] b = _srcBuf[s];
                     for (int i = 0; i < Block; i++)
@@ -1008,8 +1068,8 @@ namespace VirtualStereo
                     }
                 }
 
-                BinauralEngine.SetDirections(_snapDir, SrcCount);
-                BinauralEngine.Process(_srcBuf, SrcCount, _blockStereo, Block);
+                BinauralEngine.SetDirections(_snapDir, n);
+                BinauralEngine.Process(_srcBuf, n, _blockStereo, Block);
             }
             else
             {
@@ -1102,7 +1162,7 @@ namespace VirtualStereo
                 }
 
                 if (_screen == null)
-                    _screen = FindScreen();
+                    ScanScreens();   // 兜底：目标销毁后重新挑一台（正常由 Tick 里的判定触发）
 
                 if (_screen == null)
                 {
@@ -1124,20 +1184,8 @@ namespace VirtualStereo
                 // 屏幕自身的朝向：不看听者，人站哪都不影响
                 ScreenFrame(t, out _, out Vector3 viewerRight, out Vector3 panelUp);
 
-                // 三对音箱：上下两层贴外侧、中间一层靠内侧；上下两层各抬高 RowDyM
-                for (int row = 0; row < RowCount; row++)
-                {
-                    float spreadR = spread * (row == 1 ? RowInnerScale : RowOuterScale);
-                    float dy = row == 0 ? RowDyM : (row == 2 ? -RowDyM : 0f);
-                    for (int ch = 0; ch < 2; ch++)
-                    {
-                        float sign = ch == 0 ? -1f : 1f;
-                        int s = row * 2 + ch;
-                        _posX[s] = center.x + viewerRight.x * spreadR * sign + panelUp.x * dy;
-                        _posY[s] = center.y + viewerRight.y * spreadR * sign + panelUp.y * dy;
-                        _posZ[s] = center.z + viewerRight.z * spreadR * sign + panelUp.z * dy;
-                    }
-                }
+                // 主投影四对（外侧两对出 M、内侧两对出 S，内外间距各自可调）+ 其余投影各一对
+                LayoutSources();
             }
             catch (Exception e)
             {
@@ -1148,6 +1196,66 @@ namespace VirtualStereo
         /// <summary>屏幕自身的坐标系：正面法线 + 观众右手。只看屏幕 transform 的局部轴，
         /// 与听者位置无关——屏幕是钉上去的一面板子，朝向由摆放时的旋转决定。
         /// （面板零厚度方向=局部Y=法线；高度轴=局部Z，按世界上方翻正。）</summary>
+        /// <summary>按当前生效的投影铺开全部虚拟声源：主投影三对，其余投影各一对。</summary>
+        private static void LayoutSources()
+        {
+            _activeSrcCount = 0;
+            for (int k = 0; k < _activeScreenCount; k++)
+            {
+                var sc = _activeScreens[k];
+                if (sc == null) continue;
+                if (k == 0)
+                {
+                    for (int row = 0; row < RowCount; row++)
+                    {
+                        for (int ch = 0; ch < 2; ch++)
+                        {
+                            if (_activeSrcCount >= MaxSrcTotal) return;
+                            int s = _activeSrcCount++;
+                            _srcScreenIdx[s] = k;
+                            _srcRow[s] = row;
+                            _srcCh[s] = ch;
+                            SourcePos(sc, row, ch, out _posX[s], out _posY[s], out _posZ[s]);
+                        }
+                    }
+                }
+                else
+                {
+                    for (int ch = 0; ch < 2; ch++)
+                    {
+                        if (_activeSrcCount >= MaxSrcTotal) return;
+                        int s = _activeSrcCount++;
+                        _srcScreenIdx[s] = k;
+                        _srcRow[s] = -1;   // 次投影：只在屏幕两侧各一只
+                        _srcCh[s] = ch;
+                        SourcePos(sc, -1, ch, out _posX[s], out _posY[s], out _posZ[s]);
+                    }
+                }
+            }
+        }
+
+        /// <summary>某个虚拟声源的世界位置：屏幕中心 + 观众右手×横向比例 + 面板上轴×垂直偏移。</summary>
+        private static void SourcePos(Transform screen, int row, int ch,
+            out float px, out float py, out float pz)
+        {
+            px = py = pz = 0f;
+            if (screen == null) return;
+
+            float scale = Mathf.Abs(screen.lossyScale.x);
+            if (scale < 1e-4f) scale = 1f;
+            float halfWidth = WidthForName(screen.name) * scale * 0.5f;
+            float spread = Mathf.Clamp(halfWidth * 0.85f, 0.4f, 2.5f);
+            float scaleR = row < 0 ? RowOuterScale : RowScaleFor(row);
+            float dy = row < 0 ? 0f : RowDyFor(row);
+            float sign = ch == 0 ? -1f : 1f;
+
+            ScreenFrame(screen, out _, out Vector3 right, out Vector3 upAxis);
+            var c = screen.position;
+            px = c.x + right.x * spread * scaleR * sign + upAxis.x * dy;
+            py = c.y + right.y * spread * scaleR * sign + upAxis.y * dy;
+            pz = c.z + right.z * spread * scaleR * sign + upAxis.z * dy;
+        }
+
         private static void ScreenFrame(Transform t, out Vector3 normal, out Vector3 right, out Vector3 up)
         {
             Vector3 n = t.up;
@@ -1161,10 +1269,11 @@ namespace VirtualStereo
             right = Cross(up, new Vector3(-n.x, -n.y, -n.z));
         }
 
-        private static Transform FindScreen()
+        /// <summary>枚举房间里**所有** watch party 屏幕（原来是抓到第一个就用）。
+        /// 运行时实例名可能带 (Clone) 后缀，所以按前缀 + 物品编号匹配。</summary>
+        private static void FindScreens()
         {
-            // 运行时实例名可能带 (Clone) 等后缀，GameObject.Find 精确匹配会扑空——
-            // 改为遍历已加载场景，按前缀 + 物品编号匹配（与 ConstraintBaker 的认法一致）
+            _screens.Clear();
             for (int s = 0; s < SceneManager.sceneCount; s++)
             {
                 Scene scene = SceneManager.GetSceneAt(s);
@@ -1181,22 +1290,108 @@ namespace VirtualStereo
                         if (t == null) continue;
                         string n = t.name;
                         if (n == null || !n.StartsWith("P_RoomItem_", StringComparison.Ordinal)) continue;
+                        bool hit = false;
                         foreach (var id in ScreenIds)
                         {
-                            if (n.IndexOf(id, StringComparison.Ordinal) >= 0)
-                                return t;
+                            if (n.IndexOf(id, StringComparison.Ordinal) >= 0) { hit = true; break; }
                         }
+                        if (hit) _screens.Add(t);
                     }
                 }
             }
-            return null;
+        }
+
+        /// <summary>重扫屏幕列表并解析"当前生效的那一台"。</summary>
+        private static void ScanScreens()
+        {
+            FindScreens();
+            _activeScreenCount = 0;
+            for (int i = 0; i < MaxScreens; i++) _activeScreens[i] = null;
+
+            if (_screens.Count == 0)
+            {
+                _screen = null;
+                return;
+            }
+
+            // 主投影 = 离听者最近那台（它用完整三对）；其余投影各加一对，全部一起发声
+            _screen = NearestScreen();
+            _activeScreens[0] = _screen;
+            _activeScreenCount = 1;
+            for (int i = 0; i < _screens.Count && _activeScreenCount < MaxScreens; i++)
+            {
+                var t = _screens[i];
+                if (t == null || t == _screen) continue;
+                _activeScreens[_activeScreenCount++] = t;
+            }
+        }
+
+        /// <summary>离听者最近的那一台（自动模式）。</summary>
+        private static Transform NearestScreen()
+        {
+            if (_screens.Count == 0) return null;
+            if (_listener == null) return _screens[0];
+            var lp = _listener.position;
+            Transform best = _screens[0];
+            float bestD = float.MaxValue;
+            for (int i = 0; i < _screens.Count; i++)
+            {
+                var t = _screens[i];
+                if (t == null) continue;
+                var p = t.position;
+                float dx = p.x - lp.x, dy = p.y - lp.y, dz = p.z - lp.z;
+                float d = dx * dx + dy * dy + dz * dz;
+                if (d < bestD) { bestD = d; best = t; }
+            }
+            return best;
+        }
+
+        /// <summary>屏幕数量（0 台 = 没找到）。</summary>
+        public static int ScreenCount => _screens.Count;
+
+        /// <summary>实际参与发声的投影数（主投影 + 其余，上限 MaxScreens）。</summary>
+        public static int ActiveScreenCount => _activeScreenCount;
+
+        /// <summary>第 idx 台投影的说明（面板用）。idx = 0 是主投影。</summary>
+        public static string ActiveScreenLabel(int idx)
+        {
+            if (idx < 0 || idx >= _activeScreenCount) return "-";
+            var t = _activeScreens[idx];
+            if (t == null) return "-";
+            string d = "?";
+            if (_listener != null)
+            {
+                var p = t.position;
+                var lp = _listener.position;
+                float dx = p.x - lp.x, dy = p.y - lp.y, dz = p.z - lp.z;
+                d = ((float)Math.Sqrt(dx * dx + dy * dy + dz * dz)).ToString("F1");
+            }
+            return (idx == 0 ? "主 " : "#" + (idx + 1) + " ") + t.name + " " + d + "m";
+        }
+
+        /// <summary>面板/日志用的一行说明：名字 + 离听者距离。</summary>
+        public static string ScreenLabel(int idx)
+        {
+            if (idx < 0) return _screens.Count == 0 ? "自动（未找到屏幕）" : "自动（最近）";
+            if (idx >= _screens.Count) return "自动（超出范围）";
+            var t = _screens[idx];
+            if (t == null) return $"#{idx + 1}（已销毁）";
+            string d = "?";
+            if (_listener != null)
+            {
+                var p = t.position;
+                var lp = _listener.position;
+                float dx = p.x - lp.x, dy = p.y - lp.y, dz = p.z - lp.z;
+                d = ((float)Math.Sqrt(dx * dx + dy * dy + dz * dz)).ToString("F1");
+            }
+            return $"#{idx + 1} {t.name}  {d}m";
         }
 
         public static void StopSources()
         {
             try
             {
-                for (int s = 0; s < SrcCount; s++)
+                for (int s = 0; s < MaxSrcTotal; s++)
                 {
                     if (_marker[s] != null) Object.Destroy(_marker[s]);
                     if (_aimArrow[s] != null) Object.Destroy(_aimArrow[s]);
