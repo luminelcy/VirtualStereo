@@ -172,6 +172,10 @@ namespace VirtualStereo
         }
 
         private static void StartCapture(int bridgePid)
+            => StartCapture(bridgePid, 0);
+
+        /// <summary>depth：激活失败后"立刻重扫+重试"的次数上限，避免桥进程反复重启时打转。</summary>
+        private static void StartCapture(int bridgePid, int depth)
         {
             ReleaseCapture();
             try
@@ -188,6 +192,21 @@ namespace VirtualStereo
                 _consecutiveCaptureFails++;
                 MelonLogger.Error($"[VirtualStereo] 捕获启动失败(第 {_consecutiveCaptureFails} 次): {e.Message}");
                 _capture = null;
+
+                // 桥进程刚重启过（PID 变了）就让这次失败自愈：立刻用新 PID 重试，
+                // 不等下一个扫描周期（切视频/刷新页面时常见）。
+                if (depth < 2)
+                {
+                    int myPid = (int)NativeMethods.GetCurrentProcessId();
+                    int fresh = ProcessTree.FindChildByName(myPid, "Vuplex");
+                    if (fresh > 0 && fresh != bridgePid)
+                    {
+                        _bridgePid = fresh;
+                        StartCapture(fresh, depth + 1);
+                        return;
+                    }
+                }
+
                 // 简单退避：失败后放慢重扫
                 _nextBridgeScanAt = Environment.TickCount64 + Math.Min(30000, 2000 * _consecutiveCaptureFails);
             }

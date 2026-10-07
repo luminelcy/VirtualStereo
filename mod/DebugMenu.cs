@@ -23,12 +23,13 @@ namespace VirtualStereo
         private static bool _fieldsInit;
         private static string _lx, _ly, _lz, _rx, _ry, _rz;
         private static string _sofaPath = "";
-        private static string _gainText = "-12.0";
+        private static string _gainText = "-6.0";
         private static string _status = "";
+        private static int _eqSel;   // 当前编辑的 PEQ 带
 
         // ── 面板几何 ──
         private const float PanelW = 408f;
-        private const float PanelH = 897f;
+        private const float PanelH = 989f;
         private const float TitleH = 30f;
         private const float ManualZoneH = 72f; // 标题 + 增益滑条区（手绘），其下是 GUILayout 区
 
@@ -383,6 +384,54 @@ namespace VirtualStereo
             GUILayout.Label($"峰值={AudioEngine.LastPeak:F2}", GUILayout.Width(96));
             GUILayout.EndHorizontal();
             SyncGainText();
+
+            // ── 输入侧 PEQ（8 带：峰化/低架/高架）──
+            GUILayout.BeginHorizontal();
+            bool eqOn = GUILayout.Toggle(AudioEngine.Eq.Enabled, "输入PEQ", GUILayout.Width(74));
+            if (eqOn != AudioEngine.Eq.Enabled) AudioEngine.Eq.SetEnabled(eqOn);
+            if (GUILayout.Button("清空", GUILayout.Width(40))) AudioEngine.Eq.ClearAll();
+            if (GUILayout.Button("默认(30Hz-6)", GUILayout.Width(96))) AudioEngine.Eq.ResetToDefault();
+            GUILayout.Label($"100Hz {AudioEngine.Eq.MagDb(100f, AudioEngine.SampleRate):F1}dB",
+                GUILayout.Width(96));
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("带", GUILayout.Width(20));
+            for (int b = 0; b < 8; b++)
+            {
+                bool onB = AudioEngine.Eq.On[b];
+                string lbl = onB ? "[" + (b + 1) + "]" : (b + 1).ToString();
+                if (b == _eqSel) lbl = "▸" + lbl;
+                if (GUILayout.Button(lbl, GUILayout.Width(36))) _eqSel = b;
+            }
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            bool bandOn = GUILayout.Toggle(AudioEngine.Eq.On[_eqSel], "开", GUILayout.Width(34));
+            if (bandOn != AudioEngine.Eq.On[_eqSel]) AudioEngine.Eq.On[_eqSel] = bandOn;
+            if (GUILayout.Button("峰值", GUILayout.Width(40))) AudioEngine.Eq.Type[_eqSel] = 0;
+            if (GUILayout.Button("低架", GUILayout.Width(40))) AudioEngine.Eq.Type[_eqSel] = 1;
+            if (GUILayout.Button("高架", GUILayout.Width(40))) AudioEngine.Eq.Type[_eqSel] = 2;
+            GUILayout.Label($"{(int)AudioEngine.Eq.Freq[_eqSel]}Hz", GUILayout.Width(58));
+            if (GUILayout.Button("f-", GUILayout.Width(26)))
+                AudioEngine.Eq.Freq[_eqSel] = Math.Max(20f, AudioEngine.Eq.Freq[_eqSel] * 0.9f);
+            if (GUILayout.Button("f+", GUILayout.Width(26)))
+                AudioEngine.Eq.Freq[_eqSel] = Math.Min(20000f, AudioEngine.Eq.Freq[_eqSel] * 1.1f);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"增益{AudioEngine.Eq.GainDb[_eqSel]:F1}dB", GUILayout.Width(80));
+            if (GUILayout.Button("g-", GUILayout.Width(26)))
+                AudioEngine.Eq.GainDb[_eqSel] = Math.Max(-24f, AudioEngine.Eq.GainDb[_eqSel] - 0.5f);
+            if (GUILayout.Button("g+", GUILayout.Width(26)))
+                AudioEngine.Eq.GainDb[_eqSel] = Math.Min(24f, AudioEngine.Eq.GainDb[_eqSel] + 0.5f);
+            GUILayout.Label($"Q{AudioEngine.Eq.Q[_eqSel]:F2}", GUILayout.Width(60));
+            if (GUILayout.Button("q-", GUILayout.Width(26)))
+                AudioEngine.Eq.Q[_eqSel] = Math.Max(0.2f, AudioEngine.Eq.Q[_eqSel] - 0.1f);
+            if (GUILayout.Button("q+", GUILayout.Width(26)))
+                AudioEngine.Eq.Q[_eqSel] = Math.Min(8f, AudioEngine.Eq.Q[_eqSel] + 0.1f);
+            GUILayout.Label("低架治低频重；清空=平直", GUILayout.Width(170));
+            GUILayout.EndHorizontal();
 
             // 延迟诊断：采集环电平（读门槛）+ 设备缓冲深度 + 设备欠载次数。
             // 音频不再经 Unity：出声在音频线程上直接写声卡，所以这里没有"渲染前置"这个旋钮了。

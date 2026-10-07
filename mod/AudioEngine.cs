@@ -170,11 +170,18 @@ namespace VirtualStereo
         /// <summary>HRTF 插值方式（0 最近邻 / 1 双线性）——单模式，没有对照模式。</summary>
         public static int Interpolation { get; private set; } = PhononNative.InterpolationBilinear;
 
-        /// <summary>前置增益（dB，作用在进空间化模拟之前的原始 L/R 上；双耳 HRTF 相干叠加易爆电平，默认 -12dB 留余量）。</summary>
-        public static float PreGainDb { get; set; } = -12f;
+        /// <summary>前置增益（dB，作用在进空间化模拟之前的原始 L/R 上；双耳 HRTF 相干叠加易爆电平）。</summary>
+        public static float PreGainDb { get; set; } = -6f;
 
         /// <summary>前置增益（线性）。用 Math 而不是 Mathf（数学成员按惯例避开 IL2CPP）。</summary>
         public static float PreGainLinear => (float)Math.Pow(10.0, PreGainDb / 20.0);
+
+        /// <summary>输入侧 PEQ（8 带）：作用在进音箱之前的原始 L/R 上。面板直接读写它的参数数组。</summary>
+        private static readonly InputEq _eq = new InputEq();
+        public static InputEq Eq => _eq;
+
+        /// <summary>当前采样率（面板显示 EQ 幅响等用；未捕获时按 48k）。</summary>
+        public static int SampleRate => _capture != null && _capture.SampleRate > 0 ? _capture.SampleRate : 48000;
 
         /// <summary>最近一次泵写入信号的峰值（模拟之后），供面板观察电平。</summary>
         public static float LastPeak { get; private set; }
@@ -930,7 +937,6 @@ namespace VirtualStereo
         /// <summary>音频线程：设备-paced —— 设备缓冲有空位就产出一块。</summary>
         private static void DspLoop(int rate)
         {
-            float gain = PreGainLinear;
             long silentSince = 0;
 
             while (_audioRunning)
@@ -980,7 +986,8 @@ namespace VirtualStereo
                     else if (silentSince == 0) silentSince = now;
                     bool roomAlive = silentSince == 0 || now - silentSince <= RoomTailMs;
 
-                    ProcessBlock(rate, buffered, roomAlive, gain);
+                    // 前置增益每块现读（以前在这里缓存成局部变量 → 面板滑动条就"失灵"了）
+                    ProcessBlock(rate, buffered, roomAlive, PreGainLinear);
 
                     // 把这一块按"设备能吃的粒度"推出去：设备缓冲可能比 Block 还小
                     // （10ms 周期下可能只有 480 帧），所以不能要求一次写得下整块。
@@ -1008,6 +1015,9 @@ namespace VirtualStereo
         private static void ProcessBlock(int rate, bool buffered, bool roomAlive, float gain)
         {
             float peak = 0f;
+
+            // 输入侧 PEQ：改"音频输入响应"，在分给各音箱之前
+            _eq.Process(_blockL, _blockR, Block, rate);
 
             // 前置增益：进空间化模拟之前的输入衰减
             if (gain != 1f)
