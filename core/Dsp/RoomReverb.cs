@@ -43,6 +43,21 @@ namespace VirtualStereo.Dsp
         }
 
         /// <summary>处理一块（单声道馈入 → 去相关双声道写出）。RT60 三带单位秒。</summary>
+        /// <summary>清空混响内部状态（延迟线、低通、滤波器）。</summary>
+        public void Reset()
+        {
+            for (int k = 0; k < Lines; k++)
+            {
+                Array.Clear(_buf[k], 0, _buf[k].Length);
+                _pos[k] = 0;
+                _lp[k] = 0f;
+                _read[k] = 0f;
+                _mix[k] = 0f;
+                _xr[k][0].Reset();
+                _xr[k][1].Reset();
+            }
+        }
+
         public void Process(float[] monoL, float[] monoR, float[] outL, float[] outR,
             int frames, int rate, float rtLow, float rtMid, float rtHigh, float damp)
         {
@@ -86,7 +101,11 @@ namespace VirtualStereo.Dsp
                     float mi = _xr[k][1].TickLow(rest);
                     float hi = _xr[k][1].TickHigh(rest);
                     float fb = lo * _g0[k] + mi * _g1[k] + hi * _g2[k];
+                    // 冲掉非规格化数：混响尾衰到 1e-38 附近时，CPU 会因 denormal
+                    // 变慢几十倍，进而让音频线程喂不上声卡（听感就是咔哒/电流声）。
+                    if (fb > -1e-15f && fb < 1e-15f) fb = 0f;
                     _lp[k] += (fb - _lp[k]) * dampA;
+                    if (_lp[k] > -1e-15f && _lp[k] < 1e-15f) _lp[k] = 0f;
                     _buf[k][_pos[k]] = x + _lp[k];
                     if (++_pos[k] >= _len[k]) _pos[k] = 0;
                 }

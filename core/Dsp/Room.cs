@@ -183,6 +183,14 @@ namespace VirtualStereo.Dsp
             float high = _x2.TickHigh(rest);
             return low * g0 + mid * g1 + high * g2;
         }
+
+        /// <summary>清空滤波状态。</summary>
+        public void Reset()
+        {
+            _x1.Reset();
+            _x2.Reset();
+            _rate = -1f;
+        }
     }
 
     /// <summary>房间渲染器：一次反射（ITD/ILD）+ FDN 混响尾，产出加到两耳。</summary>
@@ -219,6 +227,21 @@ namespace VirtualStereo.Dsp
                 _filt[p] = new AbsBandFilter();
                 _surfOf[p] = RoomModel.SurfaceOfWall(p % RoomModel.Walls);
             }
+        }
+
+        /// <summary>清空全部房间内部状态：反射延迟线、材料滤波器、混响尾。
+        /// 重启音频链（F9 开关／切换 watch party）时调用，避免上一轮的残响被"接上"。</summary>
+        public void Reset()
+        {
+            for (int i = 0; i < _delay.Length; i++) _delay[i].Reset();
+            for (int p = 0; p < RoomModel.MaxPaths; p++) _filt[p].Reset();
+            for (int p = 0; p < RoomModel.MaxPaths; p++)
+            {
+                _gain[p, 0] = 0f; _gain[p, 1] = 0f;
+                _gainT[p, 0] = 0f; _gainT[p, 1] = 0f;
+                _dlyT[p, 0] = 0f; _dlyT[p, 1] = 0f;
+            }
+            _reverb.Reset();
         }
 
         /// <summary>音频线程：把房间贡献加到两耳交错立体声上（累加，不清零）。</summary>
@@ -319,11 +342,26 @@ namespace VirtualStereo.Dsp
             private int _write;
             private float _delay;
 
+            /// <summary>清空延迟线（重启音频链时用）。</summary>
+            public void Reset()
+            {
+                Array.Clear(_buf, 0, _buf.Length);
+                _write = 0;
+                _delay = 0f;
+            }
+
             public float Process(float sample, float targetDelaySamples)
             {
                 if (targetDelaySamples < 0f) targetDelaySamples = 0f;
                 if (targetDelaySamples > Size - 4) targetDelaySamples = Size - 4;
-                _delay += (targetDelaySamples - _delay) * 0.02f;
+
+                // 一阶平滑 + **速度限幅**：读指针（write − delay）绝不能比写指针跑得快，
+                // 否则线性插值不再是"延迟"，而变成混叠 → 听感就是呼啸/电流声
+                // （反射延迟每帧都在变：头一动、源一挪就跳，小屏/近距尤其明显）。
+                float step = (targetDelaySamples - _delay) * 0.02f;
+                if (step > 0.5f) step = 0.5f;
+                else if (step < -0.5f) step = -0.5f;
+                _delay += step;
 
                 _buf[_write] = sample;
                 float readPos = _write - _delay;
@@ -332,6 +370,8 @@ namespace VirtualStereo.Dsp
                 int i1 = (i0 + 1) & Mask;
                 float frac = readPos - (int)readPos;
                 float v = _buf[i0] * (1f - frac) + _buf[i1] * frac;
+                // 冲掉非规格化数（避免长时间静音后 CPU 因 denormal 变慢）
+                if (v > -1e-15f && v < 1e-15f) v = 0f;
                 _write = (_write + 1) & Mask;
                 return v;
             }

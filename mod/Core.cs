@@ -25,6 +25,11 @@ namespace VirtualStereo
     {
         private static bool _enabled = true;
         private static bool _silenced;   // 原声是否已被压到 ε（只有双耳引擎就绪后才做）
+
+        /// <summary>原声压制量 ε：会话音量压到 ε，捕获侧再乘 1/ε 补偿。
+        /// ε 越小原声越干净，但"音量级之后混进来的底噪"会被放大得越多（听感＝电流声），
+        /// 所以近距/小尺寸场景可以适当调大（0.002~0.01）。</summary>
+        public static float SilenceEps { get; set; } = 0.001f;
         private static bool _inputBroken;
         private static ProcessLoopbackCapture _capture;
         private static int _bridgePid = -1;
@@ -106,7 +111,7 @@ namespace VirtualStereo
             if (!_silenced && _capture != null && AudioEngine.HrtfReady)
             {
                 _silenced = true;
-                try { _capture.RefreshSilence(0.001f); } catch { }
+                try { _capture.RefreshSilence(SilenceEps); } catch { }
             }
 
             if (now >= _nextBridgeScanAt)
@@ -161,7 +166,7 @@ namespace VirtualStereo
                 // 视频声音的会话是播视频时才出现的，所以周期性补压 ε 并同步补偿增益。
                 if (AudioEngine.HrtfReady)
                 {
-                    _capture.RefreshSilence(0.001f);
+                    _capture.RefreshSilence(SilenceEps);
                     _silenced = true;
                 }
                 return;

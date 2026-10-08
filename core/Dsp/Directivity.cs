@@ -333,6 +333,12 @@ namespace VirtualStereo.Dsp
             _hpB.SetHighpass(sr, freq);
         }
 
+        /// <summary>清空滤波状态（重启音频链时用，避免上一轮的残留被接上）。</summary>
+        public void Reset()
+        {
+            _lpA.Reset(); _lpB.Reset(); _hpA.Reset(); _hpB.Reset();
+        }
+
         public float TickLow(float s) => _lpB.Tick(_lpA.Tick(s));
         public float TickHigh(float s) => _hpB.Tick(_hpA.Tick(s));
 
@@ -508,6 +514,10 @@ namespace VirtualStereo.Dsp
             float y = _b0 * x + _z1;
             _z1 = _b1 * x + _z2 - _a1 * y;
             _z2 = _b2 * x - _a2 * y;
+            // 冲洗非规格化数：内部状态衰减到 1e-38 量级后，CPU 处理它们会慢几十倍，
+            // 音频线程就会持续喂不上声卡（听感＝电流声）。链条里双二阶最多，必须在这里冲。
+            if (_z1 > -1e-20f && _z1 < 1e-20f) _z1 = 0f;
+            if (_z2 > -1e-20f && _z2 < 1e-20f) _z2 = 0f;
             return y;
         }
     }

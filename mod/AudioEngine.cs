@@ -44,6 +44,86 @@ namespace VirtualStereo
         // 把 MaxScreens 改成 4 即可（代码里已经支持"主投影三对 + 其余各一对"）。
         public const int MaxScreens = 1;
         public const int MaxSrcTotal = SrcCount + (MaxScreens - 1) * 2;   // 现在 = 6
+
+        // ── 按屏幕尺寸自动适配布局 ──
+        // 五档尺寸（物品编号见 WidthForName）：XS 1 对 / S 2 对 / M 2 对 / L 3 对 / XL 4 对。
+        // 纵向偏移一律用"面板半高的倍数"表达（暂按 16:9 由宽度推半高），
+        // 所以同一套规则对所有尺寸成立；关掉 LayoutAuto 就退回面板上的手动米数。
+        public static bool LayoutAuto { get; set; } = true;
+
+        // ── 输出安全限幅 ──
+        // 小尺寸 watch party 视距更近 → 1/r 距离增益更大（XS 可比 XL 高约 10 dB），
+        // 一旦超出满刻度就是声卡硬削波（听感＝"电流声"）。这里做一道软保护：
+        // 立即压（防溢出）、缓释放（不抽气）。它不是增益补偿，正常电平下不动作。
+        public static bool LimiterOn { get; set; } = true;
+        private const float LimThreshold = 0.891f;   // −1 dBFS
+        private static float _limGain = 1f;
+
+        /// <summary>限幅是否正在生效（面板显示用）。</summary>
+        public static bool LimiterActive { get; private set; }
+
+        /// <summary>当前屏幕的尺寸档名与对数（面板显示）。</summary>
+        public static string SizeName { get; private set; } = "-";
+        public static int PairCount { get; private set; }
+        public static string ActiveScreenName =>
+            _screen != null ? "  " + _screen.name : "";
+
+        private static readonly int[] SizePairs = { 1, 2, 2, 3, 4 };          // XS S M L XL
+        private static readonly string[] SizeNames = { "XS", "S", "M", "L", "XL" };
+
+        /// <summary>各尺寸档的默认前置增益（dB）：小屏视距更近，1/r 距离增益更大，所以压得更多。</summary>
+        private static readonly float[] SizePreGainDb = { -20f, -18f, -15f, -10f, -6f };
+
+        private static int _autoGainClass = -1;   // 已经按哪一档套过前置增益
+
+        /// <summary>当前尺寸档的默认前置增益（面板显示用）。</summary>
+        public static float SizeDefaultPreGainDb =>
+            (_sizeClass >= 0 && _sizeClass < SizePreGainDb.Length) ? SizePreGainDb[_sizeClass] : -6f;
+
+        // 每档的行计划：{ dyF(半高倍数), 横向比例, gM, gS }
+        // 小尺寸的视距更近，1/r 距离增益本身就更大，所以**不做增益补偿**：
+        // M/S 各对的增益一律沿用 XL 的实测值，只有"对数"随尺寸变。
+        private static readonly float[][][] RowPlans =
+        {
+            // XS：一对（普通立体声，横向贴屏幕两侧）
+            new[] { new[] { 0f, 1.00f, 1f, 1f } },
+            // S：四角——上下两排各一对普通立体声（不做 M/S 分配）。
+            // 数值已把"贴面板缘再内缩 0.1m"折进比例里（S 半宽0.72/半高0.405）：
+            //   横向 (1.2×0.85×0.72 − 0.1)/(0.85×0.72) = 1.037
+            //   纵向 (0.405 − 0.1)/0.405            = 0.753
+            new[] { new[] { 0.753f, 1.037f, 1f, 1f }, new[] { -0.753f, 1.037f, 1f, 1f } },
+            // M：同 S，内缩 0.2m（M 半宽1.0/半高0.5625）
+            //   横向 (1.2×0.85 − 0.2)/0.85 = 0.965   纵向 (0.5625 − 0.2)/0.5625 = 0.644
+            new[] { new[] { 0.644f, 0.965f, 1f, 1f }, new[] { -0.644f, 0.965f, 1f, 1f } },
+            // L：三对——M 贴上下缘，S 居中
+            new[]
+            {
+                new[] { 1.00f, 0.90f, 0.60f, 0.10f },
+                new[] { 0f, 1.20f, 0.05f, 0.50f },
+                new[] { -1.00f, 0.90f, 0.60f, 0.10f },
+            },
+            // XL：四对（2×2）——现状，且把原来的绝对米数换算成半高倍数（0.95/0.936、0.70/0.936）
+            new[]
+            {
+                new[] { 1.00f, 0.90f, 0.60f, 0.10f },
+                new[] { 0.75f, 1.20f, 0.05f, 0.50f },
+                new[] { -0.75f, 1.20f, 0.05f, 0.50f },
+                new[] { -1.00f, 0.90f, 0.60f, 0.10f },
+            },
+        };
+
+        private static int _sizeClass = 4;   // 认不出就按 XL
+
+        /// <summary>物品编号 → 尺寸档（0 XS … 4 XL）。</summary>
+        private static int SizeClassFor(string name)
+        {
+            if (name.IndexOf("02624", StringComparison.Ordinal) >= 0) return 4;
+            if (name.IndexOf("02625", StringComparison.Ordinal) >= 0) return 3;
+            if (name.IndexOf("02626", StringComparison.Ordinal) >= 0) return 2;
+            if (name.IndexOf("02627", StringComparison.Ordinal) >= 0) return 1;
+            if (name.IndexOf("02628", StringComparison.Ordinal) >= 0) return 0;
+            return 4;
+        }
         private static readonly Transform[] _activeScreens = new Transform[MaxScreens];
         private static int _activeScreenCount;
 
@@ -57,6 +137,7 @@ namespace VirtualStereo
         private static Thread _audioThread;
         private static volatile bool _audioRunning;
         private static bool _audioStarved = true;
+        private static bool _roomIdle;   // 长时间静音后房间状态已清零（避免再次反复清零）
         private const int RoomTailMs = 600;
 
         // ── 主线程写、音频线程读的空间快照（Unity 的 Transform 只能在主线程读）──
@@ -346,6 +427,9 @@ namespace VirtualStereo
         private static long _nextListenerScanAt;  // AudioListener 是整场扫描，别每帧找
         private static readonly System.Collections.Generic.List<Transform> _screens =
             new System.Collections.Generic.List<Transform>();
+        private static bool _screensScanned;      // 列表是否已扫过（等听者期间不重复整场遍历）
+        private static long _screensScannedAt;    // 本次扫描时刻（等听者的宽限从此刻算起）
+        private static long _nextListenerLookupAt;// 等听者期间的查找节流
 
         /// <summary>听音室：一次反射 + FDN 混响尾（只在双耳模式下有输出缓冲可用）。</summary>
         public static bool RoomOn
@@ -637,8 +721,8 @@ namespace VirtualStereo
                 int row = _srcRow[s], ch = _srcCh[s];
                 var pos = new Vector3(_posX[s], _posY[s], _posZ[s]);
                 Color col = ch == 0 ? new Color(0.25f, 0.55f, 1f) : new Color(1f, 0.35f, 0.3f);
-                // 内侧两对最亮（它们出 S、是"面"的主体）、外侧两对暗一点；次投影再暗一档
-                float shade = row < 0 ? 0.35f : (RowIsInner(row) ? 1f : 0.6f);
+                // 出 S 的那几对最亮（它们是"面"的主体），出 M 的暗一点；次投影再暗一档
+                float shade = row < 0 ? 0.35f : (EffGainS(row) > EffGainM(row) ? 1f : 0.6f);
                 col = new Color(col.r * shade, col.g * shade, col.b * shade);
 
                 if (_marker[s] == null) _marker[s] = MakeMarker($"VS_Marker_{s}", col);
@@ -761,6 +845,7 @@ namespace VirtualStereo
         {
             _capture = capture;
             _screen = null;      // 重新挑一次目标（离摄像头最近那台）
+            _screensScanned = false;
             ScanScreens();
             StartAudio();
         }
@@ -853,7 +938,8 @@ namespace VirtualStereo
                 // 次投影只有一对，朝它自己的观众侧（偏移 0）
                 int row = _srcRow[s];
                 int ch = _srcCh[s];
-                float outDeg = row < 0 || RowIsInner(row) ? 0f : RowOuterAimDeg;
+                // 自动模式下不额外外偏；手动模式保留面板上的"外偏角"
+                float outDeg = LayoutAuto || row < 0 || RowIsInner(row) ? 0f : RowOuterAimDeg;
                 Vector3 aim = AimWorldForScreen(_activeScreens[_srcScreenIdx[s]], row, ch, outDeg);
                 HeadAngles(aim, out float aaz, out float ael);
                 _srcAimMode[s] = 2; // 手动角度分支
@@ -899,6 +985,11 @@ namespace VirtualStereo
                 return;
             }
             BinauralEngine.SetInterpolation(Interpolation);
+
+            // 重启音频链时清空房间/PEQ 的内部状态：否则上一次运行的混响尾与滤波器残量
+            // 会被"接上"，听感上就是切换瞬间的一声电流/呼啦声。
+            _room.Reset();
+            _eq.Reset();
 
             try
             {
@@ -986,6 +1077,20 @@ namespace VirtualStereo
                     else if (silentSince == 0) silentSince = now;
                     bool roomAlive = silentSince == 0 || now - silentSince <= RoomTailMs;
 
+                    // 尾巴早就衰完还继续静音：把房间内部状态整体清零。
+                    // 否则延迟线/混响里的极小残值会一直在非规格化数区间里打转，
+                    // 拖慢音频线程（表现为持续的电流声）。
+                    if (silentSince != 0 && now - silentSince > 1500 && !_roomIdle)
+                    {
+                        _roomIdle = true;
+                        _room.Reset();
+                        _eq.Reset();
+                    }
+                    else if (buffered)
+                    {
+                        _roomIdle = false;
+                    }
+
                     // 前置增益每块现读（以前在这里缓存成局部变量 → 面板滑动条就"失灵"了）
                     ProcessBlock(rate, buffered, roomAlive, PreGainLinear);
 
@@ -1034,17 +1139,9 @@ namespace VirtualStereo
                 for (int s = 0; s < n; s++)
                 {
                     int row = _srcRow[s];
-                    float gm, gs;
-                    if (row < 0)
-                    {
-                        // 次投影：一对，直接吃整份 L/R（同一网页音频从这块投影也发出来）
-                        gm = gs = SecondaryScreenGain;
-                    }
-                    else
-                    {
-                        gm = RowOn[row] ? RowGainM[row] : 0f;
-                        gs = RowOn[row] ? RowGainS[row] : 0f;
-                    }
+                    // 自动模式取尺寸档计划；手动模式取面板参数；次投影（row<0）吃整份 L/R
+                    float gm = EffGainM(row);
+                    float gs = EffGainS(row);
                     // 左箱拿 M+S、右箱拿 M−S —— 因为 L = M+S、R = M−S，
                     // 这样"这只箱子在屏幕左边"与"它放的是 L 内容"才对得上。
                     // （原来写成 −S / +S，等于把左右内容对调了。）
@@ -1102,6 +1199,25 @@ namespace VirtualStereo
                 float a = _blockStereo[i] < 0 ? -_blockStereo[i] : _blockStereo[i];
                 if (a > peak) peak = a;
             }
+
+            // 输出安全限幅（不是增益补偿：正常电平下增益恒 1，只在超阈时压）
+            bool lim = false;
+            if (LimiterOn)
+            {
+                for (int i = 0; i < Block * 2; i += 2)
+                {
+                    float l = _blockStereo[i], r = _blockStereo[i + 1];
+                    float a = (l < 0 ? -l : l) > (r < 0 ? -r : r)
+                        ? (l < 0 ? -l : l) : (r < 0 ? -r : r);
+                    float target = a > LimThreshold ? LimThreshold / a : 1f;
+                    if (target < _limGain) { _limGain = target; lim = true; }
+                    else _limGain += (1f - _limGain) * 0.0005f;   // 缓释放（约几十毫秒）
+                    _blockStereo[i] = l * _limGain;
+                    _blockStereo[i + 1] = r * _limGain;
+                }
+            }
+            LimiterActive = lim;
+
             LastPeak = peak;
         }
 
@@ -1206,7 +1322,7 @@ namespace VirtualStereo
         /// <summary>屏幕自身的坐标系：正面法线 + 观众右手。只看屏幕 transform 的局部轴，
         /// 与听者位置无关——屏幕是钉上去的一面板子，朝向由摆放时的旋转决定。
         /// （面板零厚度方向=局部Y=法线；高度轴=局部Z，按世界上方翻正。）</summary>
-        /// <summary>按当前生效的投影铺开全部虚拟声源：主投影三对，其余投影各一对。</summary>
+        /// <summary>按当前生效的投影铺开全部虚拟声源：主投影按尺寸档给 N 对，其余投影各一对。</summary>
         private static void LayoutSources()
         {
             _activeSrcCount = 0;
@@ -1216,7 +1332,29 @@ namespace VirtualStereo
                 if (sc == null) continue;
                 if (k == 0)
                 {
-                    for (int row = 0; row < RowCount; row++)
+                    // 尺寸档在这里确定（主线程），音频线程随后读同样的档位算增益
+                    _sizeClass = SizeClassFor(sc.name ?? "");
+                    SizeName = SizeNames[_sizeClass];
+                    PairCount = LayoutAuto ? SizePairs[_sizeClass] : RowCount;
+
+                    // 前置增益按尺寸档自动套用（只在档位变化时设一次，之后仍可手动微调）
+                    if (LayoutAuto)
+                    {
+                        if (_autoGainClass != _sizeClass)
+                        {
+                            _autoGainClass = _sizeClass;
+                            PreGainDb = SizePreGainDb[_sizeClass];
+                            MelonLogger.Msg($"[VirtualStereo] 尺寸 {SizeName}：前置增益 {PreGainDb:F1} dB");
+                        }
+                    }
+                    else
+                    {
+                        _autoGainClass = -1;   // 关掉自动后，下次开启时重新套用
+                    }
+
+                    int rows = PairCount;
+
+                    for (int row = 0; row < rows; row++)
                     {
                         for (int ch = 0; ch < 2; ch++)
                         {
@@ -1244,6 +1382,27 @@ namespace VirtualStereo
             }
         }
 
+        // ── 当前生效的行参数（自动模式取尺寸档的计划，手动模式取面板参数）──
+        private static float EffDy(int row, float halfHeight) =>
+            LayoutAuto ? RowPlans[_sizeClass][row][0] * halfHeight : RowDyFor(row);
+
+        private static float EffLateral(int row) =>
+            LayoutAuto ? RowPlans[_sizeClass][row][1] : RowScaleFor(row);
+
+        private static float EffGainM(int row)
+        {
+            if (row < 0) return SecondaryScreenGain;
+            if (LayoutAuto) return RowPlans[_sizeClass][row][2];
+            return RowOn[row] ? RowGainM[row] : 0f;
+        }
+
+        private static float EffGainS(int row)
+        {
+            if (row < 0) return SecondaryScreenGain;
+            if (LayoutAuto) return RowPlans[_sizeClass][row][3];
+            return RowOn[row] ? RowGainS[row] : 0f;
+        }
+
         /// <summary>某个虚拟声源的世界位置：屏幕中心 + 观众右手×横向比例 + 面板上轴×垂直偏移。</summary>
         private static void SourcePos(Transform screen, int row, int ch,
             out float px, out float py, out float pz)
@@ -1255,8 +1414,9 @@ namespace VirtualStereo
             if (scale < 1e-4f) scale = 1f;
             float halfWidth = WidthForName(screen.name) * scale * 0.5f;
             float spread = Mathf.Clamp(halfWidth * 0.85f, 0.4f, 2.5f);
-            float scaleR = row < 0 ? RowOuterScale : RowScaleFor(row);
-            float dy = row < 0 ? 0f : RowDyFor(row);
+            float halfHeight = halfWidth * 9f / 16f;   // 暂按 16:9 由宽度推半高
+            float scaleR = row < 0 ? RowOuterScale : EffLateral(row);
+            float dy = row < 0 ? 0f : EffDy(row, halfHeight);
             float sign = ch == 0 ? -1f : 1f;
 
             ScreenFrame(screen, out _, out Vector3 right, out Vector3 upAxis);
@@ -1314,11 +1474,31 @@ namespace VirtualStereo
         /// <summary>重扫屏幕列表并解析"当前生效的那一台"。</summary>
         private static void ScanScreens()
         {
-            FindScreens();
+            if (!_screensScanned)
+            {
+                FindScreens();
+                _screensScanned = true;
+                _screensScannedAt = NowMs;
+            }
             _activeScreenCount = 0;
             for (int i = 0; i < MaxScreens; i++) _activeScreens[i] = null;
 
             if (_screens.Count == 0)
+            {
+                _screen = null;
+                return;
+            }
+
+            // 要按"离摄像头最近"绑定，就必须等 AudioListener 出现——第一次启动时
+            // 它可能还没被找到。这里最多等 3 秒（查找节流 250ms），期间先不绑，
+            // 免得随手抓一台不是最近的；超过 3 秒仍没有听者才退化为"第一台"。
+            if (_listener == null && NowMs >= _nextListenerLookupAt)
+            {
+                _nextListenerLookupAt = NowMs + 250;
+                var al = Object.FindObjectOfType<AudioListener>();
+                _listener = al != null ? al.transform : null;
+            }
+            if (_listener == null && NowMs - _screensScannedAt < 3000)
             {
                 _screen = null;
                 return;

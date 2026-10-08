@@ -29,7 +29,7 @@ namespace VirtualStereo
 
         // ── 面板几何 ──
         private const float PanelW = 408f;
-        private const float PanelH = 989f;
+        private const float PanelH = 1085f;
         private const float TitleH = 30f;
         private const float ManualZoneH = 72f; // 标题 + 增益滑条区（手绘），其下是 GUILayout 区
 
@@ -134,9 +134,18 @@ namespace VirtualStereo
                     AudioEngine.SpatialBlend = AudioEngine.SpatialBlend + 0.05f;
                 GUILayout.EndHorizontal();
 
-                // ── 三对虚拟音箱（面声源）：0 上 / 1 中 / 2 下 ──
+                // ── 尺寸适配：自动按屏幕尺寸选对数与纵向偏移（关掉才用手动参数）──
                 GUILayout.BeginHorizontal();
-                GUILayout.Label("四对", GUILayout.Width(30));
+                bool autoLay = GUILayout.Toggle(AudioEngine.LayoutAuto, "按尺寸自动", GUILayout.Width(94));
+                if (autoLay != AudioEngine.LayoutAuto) AudioEngine.LayoutAuto = autoLay;
+                GUILayout.Label($"屏幕 {AudioEngine.SizeName}（{AudioEngine.PairCount} 对）" +
+                    $"{AudioEngine.ActiveScreenName}", GUILayout.Width(230));
+                GUILayout.EndHorizontal();
+                GUILayout.Label("  XS1对 / S·M 2对 / L 3对 / XL 4对；纵向按半高比例（暂按16:9）");
+
+                // ── 手动布局（自动关闭时生效）：四对 ──
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("手动", GUILayout.Width(30));
                 string[] rowNames = { "上外", "上内", "下内", "下外" };
                 for (int row = 0; row < 4; row++)
                 {
@@ -382,8 +391,22 @@ namespace VirtualStereo
             if (GUILayout.Button("-1dB", GUILayout.Width(44))) SetGainDb(AudioEngine.PreGainDb - 1f);
             if (GUILayout.Button("+1dB", GUILayout.Width(44))) SetGainDb(AudioEngine.PreGainDb + 1f);
             GUILayout.Label($"峰值={AudioEngine.LastPeak:F2}", GUILayout.Width(96));
+            if (AudioEngine.LayoutAuto)
+                GUILayout.Label($"(尺寸默认 {AudioEngine.SizeDefaultPreGainDb:F0}dB)", GUILayout.Width(120));
             GUILayout.EndHorizontal();
             SyncGainText();
+
+            // ── 安全：输出限幅 + 原声压制量 ε ──
+            GUILayout.BeginHorizontal();
+            bool limOn = GUILayout.Toggle(AudioEngine.LimiterOn, "输出限幅", GUILayout.Width(74));
+            if (limOn != AudioEngine.LimiterOn) AudioEngine.LimiterOn = limOn;
+            GUILayout.Label(AudioEngine.LimiterActive ? "（生效中）" : "（未触发）", GUILayout.Width(72));
+            GUILayout.Label($"原声压制{Core.SilenceEps:F3}", GUILayout.Width(112));
+            if (GUILayout.Button("0.001", GUILayout.Width(50))) Core.SilenceEps = 0.001f;
+            if (GUILayout.Button("0.002", GUILayout.Width(50))) Core.SilenceEps = 0.002f;
+            if (GUILayout.Button("0.005", GUILayout.Width(50))) Core.SilenceEps = 0.005f;
+            GUILayout.EndHorizontal();
+            GUILayout.Label("  限幅：小尺寸/近距场景防削波；压制 ε 越小原声越干净，但底噪放得越多");
 
             // ── 输入侧 PEQ（8 带：峰化/低架/高架）──
             GUILayout.BeginHorizontal();
